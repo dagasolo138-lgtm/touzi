@@ -1,0 +1,3 @@
+import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { formatMoney } from '../utils/formatters.js';
+export default function PerformanceChart({ snapshots=[] }){ const data=snapshots.map(s=>({date:s.date, 市值:s.totalValue, 成本:s.totalCost})); return <div className="card p-4"><h3 className="mb-3 font-semibold">组合市值曲线</h3><ResponsiveContainer width="100%" height={320}><LineChart data={data}><CartesianGrid stroke="#3e3e42"/><XAxis dataKey="date"/><YAxis tickFormatter={(v)=>formatMoney(v)}/><Tooltip formatter={(v)=>formatMoney(v)}/><Legend/><Line dataKey="市值" stroke="#4ade80"/><Line dataKey="成本" stroke="#007acc"/></LineChart></ResponsiveContainer></div> }
