@@ -2,7 +2,7 @@ const MODEL = 'deepseek-v4-pro';
 const BASE_URL = 'https://api.deepseek.com';
 const MAX_TOOL_ROUNDS = 5;
 
-const THINKING_CONFIG = {
+export const THINKING_CONFIG = {
   disabled: { thinking: { type: 'disabled' } },
   high: { thinking: { type: 'enabled' }, reasoning_effort: 'high' },
   max: { thinking: { type: 'enabled' }, reasoning_effort: 'max' },
@@ -47,7 +47,7 @@ export async function streamWithTools({ messages, systemPrompt, thinkingMode = '
   return totalUsage;
 }
 
-async function streamOnce({ messages, config, tools, onChunk, apiKey }) {
+export async function streamOnce({ messages, config, tools, onChunk, apiKey }) {
   const body = { model: MODEL, messages, stream: true, stream_options: { include_usage: true }, tools: tools?.length ? tools : undefined, tool_choice: tools?.length ? 'auto' : undefined, ...config };
   const res = await fetch(`${BASE_URL}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify(body) });
 
@@ -108,6 +108,29 @@ async function streamOnce({ messages, config, tools, onChunk, apiKey }) {
     usage,
     assistantMessage: { role: 'assistant', content: assistantContent || null, ...(assistantReasoning ? { reasoning_content: assistantReasoning } : {}), ...(toolCalls.length ? { tool_calls: toolCalls } : {}) },
   };
+}
+
+export async function chatCompletion({ messages, systemPrompt, thinkingMode = 'disabled', apiKey }) {
+  const key = apiKey || localStorage.getItem('deepseekApiKey');
+  if (!key) throw new Error('请先在设置页填写 DeepSeek API Key');
+  const config = THINKING_CONFIG[thinkingMode] || THINKING_CONFIG.disabled;
+  const body = { model: MODEL, messages: [{ role: 'system', content: systemPrompt }, ...messages], stream: false, ...config };
+  const res = await fetch(`${BASE_URL}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }, body: JSON.stringify(body) });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `DeepSeek API错误 ${res.status}`);
+  }
+  const data = await res.json();
+  return { content: data.choices?.[0]?.message?.content || '', usage: data.usage || {} };
+}
+
+export async function streamChatCompletion({ messages, systemPrompt, thinkingMode = 'disabled', apiKey, onChunk }) {
+  const key = apiKey || localStorage.getItem('deepseekApiKey');
+  if (!key) throw new Error('请先在设置页填写 DeepSeek API Key');
+  const config = THINKING_CONFIG[thinkingMode] || THINKING_CONFIG.disabled;
+  const { usage } = await streamOnce({ messages: [{ role: 'system', content: systemPrompt }, ...messages], config, onChunk, apiKey: key });
+  onChunk?.({ type: 'done', usage: usage || {} });
+  return { usage: usage || {} };
 }
 
 export function estimateCost(usageOrInput = 0, outputTokens = 0) {

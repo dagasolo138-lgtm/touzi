@@ -3,8 +3,10 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { clearAllConversations, deleteConversation, getConfig, getConversation, getConversations, saveAiLog, saveConversation } from '../db/index.js';
 import { estimateCost, streamWithTools } from '../services/deepseek.js';
-import { ANALYST_SYSTEM_PROMPT } from '../services/analystPrompt.js';
-import { TOOL_DEFINITIONS, buildPortfolioContext, executeTool as runTool } from '../services/exaSearch.js';
+import { ANALYST_SYSTEM_PROMPT, TRIAGE_PROMPT } from '../services/analystPrompt.js';
+import { runStep, runNewCapital, runFundDive, runHealthCheck } from '../services/skillPipelines.js';
+import { TOOL_DEFINITIONS, buildPortfolioContext, executeTool as runTool, exaSearch } from '../services/exaSearch.js';
+import { fetchNavHistory } from '../services/fundApi.js';
 import { useStore } from '../store/useStore.js';
 import { makeId } from '../utils/formatters.js';
 
@@ -56,6 +58,10 @@ export default function AIAnalyst() {
   const [thinkingMode, setThinkingMode] = useState('disabled');
   const [lastUsage, setLastUsage] = useState(null);
   const [error, setError] = useState('');
+  const [pipelineSteps, setPipelineSteps] = useState([]);
+  const [hitl, setHitl] = useState(null);
+  const iteratorRef = useRef(null);
+  const runtimeRef = useRef(null);
   const scrollerRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -77,6 +83,8 @@ export default function AIAnalyst() {
     setDisplayMessages([]);
     setApiMessages([]);
     setLastUsage(null);
+    setPipelineSteps([]);
+    setHitl(null);
     setError('');
   }
 
@@ -124,6 +132,73 @@ export default function AIAnalyst() {
     resizeInput(event.target);
   }
 
+
+  function jsonParseSafe(text, fallback = null) {
+    try { return JSON.parse(text); } catch { return fallback; }
+  }
+
+  function stepLabelsFor(skill) {
+    const map = {
+      new_capital: [['allocation_analysis', '配置分析'], ['technical_analysis', '技术分析'], ['macro_assessment', '宏观研判'], ['final_synthesis', '生成建议']],
+      fund_dive: [['technical_analysis', '技术分析'], ['macro_assessment', '宏观研判'], ['allocation_analysis', '持仓上下文'], ['final_synthesis', '生成建议']],
+      health_check: [['allocation_analysis', '配置分析'], ['final_synthesis', '生成报告']],
+    };
+    return (map[skill] || []).map(([name, label]) => ({ name, label, status: 'waiting', start: 0, duration: 0 }));
+  }
+
+  function updateStep(name, patch) {
+    setPipelineSteps((steps) => steps.map((step) => (step.name === name ? { ...step, ...patch } : step)));
+  }
+
+  async function consumePipeline() {
+    const runtime = runtimeRef.current;
+    const iterator = iteratorRef.current;
+    let pausedForHitl = false;
+    if (!runtime || !iterator) return;
+    try {
+      while (true) {
+        const { value: event, done } = await iterator.next();
+        if (done) break;
+        if (event.type === 'step_start') updateStep(event.stepName, { status: 'running', start: Date.now(), label: event.stepLabel });
+        if (event.type === 'step_done') setPipelineSteps((steps) => steps.map((step) => (step.name === event.stepName ? { ...step, status: 'done', duration: Date.now() - (step.start || Date.now()) } : step)));
+        if (event.usage) { runtime.finalUsage = event.usage; setLastUsage(event.usage); }
+        if (event.type === 'hitl') { pausedForHitl = true; setHitl({ summary: event.summary }); setIsStreaming(false); return; }
+        if (event.type === 'final') {
+          runtime.assistantText += event.content || '';
+          runtime.finalUsage = event.usage || runtime.finalUsage;
+          if (event.usage) {
+            setLastUsage(runtime.finalUsage);
+            setPipelineSteps((steps) => steps.map((step) => (step.name === 'final_synthesis' ? { ...step, status: 'done', duration: Date.now() - (step.start || Date.now()) } : step)));
+          }
+          runtime.applyDisplay((msgs) => msgs.map((msg) => (msg.id === runtime.assistantId ? { ...msg, content: msg.content + (event.content || ''), status: event.done ? 'done' : msg.status, usage: runtime.finalUsage } : msg)));
+        }
+        if (event.type === 'error') throw new Error(event.message);
+      }
+      const completedApi = [...runtime.nextApi, { role: 'assistant', content: runtime.assistantText }];
+      setApiMessages(completedApi);
+      await persistConversation({ convId: runtime.convId, display: runtime.finalDisplay, api: completedApi, usage: runtime.finalUsage });
+      await saveAiLog({ question: runtime.q.slice(0, 50), thinkingMode, inputTokens: runtime.finalUsage?.prompt_tokens || 0, outputTokens: runtime.finalUsage?.completion_tokens || 0, reasoningTokens: runtime.finalUsage?.reasoning_tokens || 0, estimatedCostUSD: parseFloat(estimateCost(runtime.finalUsage || {}).toFixed(4)), exaCallCount: 0 });
+    } catch (e) {
+      setError(e.message);
+      runtime.applyDisplay((msgs) => msgs.map((msg) => (msg.id === runtime.assistantId ? { ...msg, content: msg.content || `出错：${e.message}`, status: 'error', reasoningDone: true } : msg)));
+    } finally {
+      if (!pausedForHitl) setIsStreaming(false);
+    }
+  }
+
+  async function continueHitl() {
+    setHitl(null);
+    setIsStreaming(true);
+    await consumePipeline();
+  }
+
+  async function cancelHitl() {
+    const runtime = runtimeRef.current;
+    setHitl(null);
+    iteratorRef.current = null;
+    if (runtime) runtime.applyDisplay((msgs) => msgs.map((msg) => (msg.id === runtime.assistantId ? { ...msg, content: `${msg.content}\n\n已取消生成建议。`, status: 'done' } : msg)));
+  }
+
   async function send() {
     const q = input.trim();
     if (!q || isStreaming) return;
@@ -131,7 +206,7 @@ export default function AIAnalyst() {
     const convId = currentConvId || makeId();
     const userDisplay = { id: makeId(), role: 'user', content: q, reasoning: '', reasoningDone: true, toolEvents: [], status: 'done', timestamp: Date.now() };
     const assistantId = makeId();
-    const assistantDisplay = { id: assistantId, role: 'assistant', content: '', reasoning: '', reasoningDone: false, toolEvents: [], status: 'streaming', timestamp: Date.now() };
+    const assistantDisplay = { id: assistantId, role: 'assistant', content: '', reasoning: '', reasoningDone: true, toolEvents: [], status: 'streaming', timestamp: Date.now() };
     const contextMessage = { role: 'system', content: latestContext };
     const userApiMessage = { role: 'user', content: q };
     const nextDisplay = [...displayMessages, userDisplay, assistantDisplay];
@@ -143,65 +218,64 @@ export default function AIAnalyst() {
     setInput('');
     setIsStreaming(true);
     setLastUsage(null);
+    setPipelineSteps([]);
+    setHitl(null);
     setError('');
 
     let finalDisplay = nextDisplay;
     let assistantText = '';
-    let assistantReasoning = '';
     let finalUsage = null;
-
     const applyDisplay = (producer) => {
       setDisplayMessages((msgs) => {
         const updated = producer(msgs);
         finalDisplay = updated;
+        if (runtimeRef.current) runtimeRef.current.finalDisplay = updated;
         return updated;
       });
     };
 
     try {
       const cfg = await getConfig();
-      const usage = await streamWithTools({
-        messages: nextApi,
-        systemPrompt: ANALYST_SYSTEM_PROMPT,
-        thinkingMode,
-        tools: TOOL_DEFINITIONS,
-        executeTool: (name, args) => runTool(name, args, { proxyUrl: cfg.proxyUrl, holdings, config }),
-        onChunk: (chunk) => {
-          if (chunk.type === 'reasoning') {
-            assistantReasoning += chunk.content;
-            applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, reasoning: msg.reasoning + chunk.content } : msg)));
-          }
-          if (chunk.type === 'text') {
-            assistantText += chunk.content;
-            applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, content: msg.content + chunk.content, reasoningDone: true } : msg)));
-          }
-          if (chunk.type === 'tool_start') {
-            applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, reasoningDone: true, toolEvents: [...(msg.toolEvents || []), { callId: chunk.callId, name: chunk.name, status: 'running', result: '' }] } : msg)));
-          }
-          if (chunk.type === 'tool_result') {
-            applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, toolEvents: (msg.toolEvents || []).map((evt) => (evt.callId === chunk.callId ? { ...evt, status: chunk.error ? 'error' : 'done', error: chunk.error, result: chunk.result } : evt)) } : msg)));
-          }
-          if (chunk.type === 'done') {
-            finalUsage = chunk.usage;
-            setLastUsage(chunk.usage);
-            applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, status: 'done', reasoningDone: true, usage: chunk.usage } : msg)));
-          }
-          if (chunk.type === 'error') throw new Error(chunk.message);
-        },
-      });
-      finalUsage = finalUsage || usage;
-      const completedApi = [...nextApi, { role: 'assistant', content: assistantText }];
-      setApiMessages(completedApi);
-      await persistConversation({ convId, display: finalDisplay, api: completedApi, usage: finalUsage });
-      await saveAiLog({
-        question: q.slice(0, 50),
-        thinkingMode,
-        inputTokens: finalUsage?.prompt_tokens || 0,
-        outputTokens: finalUsage?.completion_tokens || 0,
-        reasoningTokens: finalUsage?.reasoning_tokens || 0,
-        estimatedCostUSD: parseFloat(estimateCost(finalUsage || {}).toFixed(4)),
-        exaCallCount: (finalDisplay[finalDisplay.length - 1]?.toolEvents || []).filter((e) => e.name === 'exa_search').length,
-      });
+      const apiKey = localStorage.getItem('deepseekApiKey');
+      const triageRes = await runStep(TRIAGE_PROMPT, q, thinkingMode, apiKey);
+      const triage = jsonParseSafe(triageRes.content, { skill: 'general', params: {}, reason: '无法解析意图' });
+      finalUsage = triageRes.usage;
+      setLastUsage(finalUsage);
+
+      if (triage.skill === 'general') {
+        const usage = await streamWithTools({
+          messages: nextApi,
+          systemPrompt: ANALYST_SYSTEM_PROMPT,
+          thinkingMode,
+          tools: TOOL_DEFINITIONS,
+          executeTool: (name, args) => runTool(name, args, { proxyUrl: cfg.proxyUrl, holdings, config }),
+          onChunk: (chunk) => {
+            if (chunk.type === 'text') { assistantText += chunk.content; applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, content: msg.content + chunk.content } : msg))); }
+            if (chunk.type === 'tool_start') applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, toolEvents: [...(msg.toolEvents || []), { callId: chunk.callId, name: chunk.name, status: 'running', result: '' }] } : msg)));
+            if (chunk.type === 'tool_result') applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, toolEvents: (msg.toolEvents || []).map((evt) => (evt.callId === chunk.callId ? { ...evt, status: chunk.error ? 'error' : 'done', error: chunk.error, result: chunk.result } : evt)) } : msg)));
+            if (chunk.type === 'done') { finalUsage = chunk.usage; setLastUsage(chunk.usage); applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, status: 'done', usage: chunk.usage } : msg))); }
+          },
+        });
+        finalUsage = finalUsage || usage;
+        const completedApi = [...nextApi, { role: 'assistant', content: assistantText }];
+        setApiMessages(completedApi);
+        await persistConversation({ convId, display: finalDisplay, api: completedApi, usage: finalUsage });
+        await saveAiLog({ question: q.slice(0, 50), thinkingMode, inputTokens: finalUsage?.prompt_tokens || 0, outputTokens: finalUsage?.completion_tokens || 0, reasoningTokens: finalUsage?.reasoning_tokens || 0, estimatedCostUSD: parseFloat(estimateCost(finalUsage || {}).toFixed(4)), exaCallCount: (finalDisplay[finalDisplay.length - 1]?.toolEvents || []).filter((e) => e.name === 'exa_search').length });
+        return;
+      }
+
+      setPipelineSteps(stepLabelsFor(triage.skill));
+      const navFetcher = (code, days) => fetchNavHistory(code, days);
+      const exaSearcher = (query, category = 'news') => exaSearch(query, category, cfg.proxyUrl);
+      const params = triage.params || {};
+      const iterator = triage.skill === 'new_capital'
+        ? runNewCapital(params.amount, holdings, config, navFetcher, exaSearcher, thinkingMode, apiKey)
+        : triage.skill === 'fund_dive'
+          ? runFundDive(params.fundCode, params.fundName, holdings, config, navFetcher, exaSearcher, thinkingMode, apiKey)
+          : runHealthCheck(holdings, config, thinkingMode, apiKey);
+      iteratorRef.current = iterator;
+      runtimeRef.current = { q, convId, assistantId, nextApi, finalDisplay, assistantText, finalUsage, applyDisplay };
+      await consumePipeline();
     } catch (e) {
       setError(e.message);
       applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, content: msg.content || `出错：${e.message}`, status: 'error', reasoningDone: true } : msg)));
@@ -243,6 +317,19 @@ export default function AIAnalyst() {
             </div>
           </div>)}
         </div>
+        {(pipelineSteps.length > 0 || hitl) && <div className="border-t border-vscode-border bg-[#181818] p-4">
+          {pipelineSteps.length > 0 && <div className="mb-3 flex flex-wrap gap-3 text-sm">
+            {pipelineSteps.map((step) => <div key={step.name} className="flex items-center gap-2 rounded-full border border-vscode-border px-3 py-1 text-gray-300">
+              {step.status === 'running' ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-blue-400 border-t-transparent" /> : step.status === 'done' ? <span className="text-green-400">✓</span> : <span className="h-2 w-2 rounded-full bg-gray-500" />}
+              <span>{step.label}</span>
+              <span className="text-xs text-gray-500">{step.status === 'waiting' ? '等待中' : step.status === 'running' ? '运行中' : `${(step.duration / 1000).toFixed(1)}s`}</span>
+            </div>)}
+          </div>}
+          {hitl && <div className="rounded-lg border border-blue-500/40 bg-blue-500/10 p-3 text-sm">
+            <pre className="whitespace-pre-wrap text-gray-100">{hitl.summary}</pre>
+            <div className="mt-3 flex gap-2"><button className="btn" onClick={continueHitl}>继续生成建议</button><button className="btn2" onClick={cancelHitl}>取消</button></div>
+          </div>}
+        </div>}
         <div className="border-t border-vscode-border p-4">
           {lastUsage && <div className="mb-2 text-right text-xs text-gray-500">Token消耗：{((lastUsage.prompt_tokens || 0) + (lastUsage.completion_tokens || 0) + (lastUsage.reasoning_tokens || 0)).toLocaleString()} | ≈${estimateCost(lastUsage).toFixed(4)}</div>}
           {error && <p className="danger mb-2">{error}</p>}
