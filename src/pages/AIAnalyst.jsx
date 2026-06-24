@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { clearAllConversations, deleteConversation, getConfig, getConversation, getConversations, saveAiLog, saveConversation } from '../db/index.js';
 import { estimateCost, streamWithTools } from '../services/deepseek.js';
 import { ANALYST_SYSTEM_PROMPT } from '../services/analystPrompt.js';
@@ -11,6 +13,22 @@ const MODE_OPTIONS = [
   ['high', '标准'],
   ['max', '深度'],
 ];
+
+const MARKDOWN_COMPONENTS = {
+  h1: ({ children }) => <h1 className="mb-2 mt-3 text-xl font-bold text-white">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-2 mt-3 text-lg font-bold text-white">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-2 mt-3 text-base font-semibold text-white">{children}</h3>,
+  p: ({ children }) => <p className="my-2">{children}</p>,
+  strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+  ul: ({ children }) => <ul className="my-2 list-disc pl-5">{children}</ul>,
+  ol: ({ children }) => <ol className="my-2 list-decimal pl-5">{children}</ol>,
+  li: ({ children }) => <li className="my-1">{children}</li>,
+  table: ({ children }) => <div className="my-3 overflow-x-auto"><table className="w-full border-collapse text-left">{children}</table></div>,
+  th: ({ children }) => <th className="border border-vscode-border bg-[#151515] px-2 py-1 font-semibold text-gray-200">{children}</th>,
+  td: ({ children }) => <td className="border border-vscode-border px-2 py-1 text-gray-100">{children}</td>,
+  code: ({ children }) => <code className="rounded bg-[#111] px-1 py-0.5 text-xs text-blue-200">{children}</code>,
+  pre: ({ children }) => <pre className="my-2 overflow-x-auto rounded bg-[#111] p-3 text-xs text-gray-200">{children}</pre>,
+};
 
 function getToolLabel(name) {
   return { exa_search: '搜索网络', fetch_fund_nav_history: '拉取净值历史', get_portfolio_context: '读取持仓' }[name] || name;
@@ -36,10 +54,12 @@ export default function AIAnalyst() {
   const [lastUsage, setLastUsage] = useState(null);
   const [error, setError] = useState('');
   const scrollerRef = useRef(null);
+  const inputRef = useRef(null);
 
   useEffect(() => { loadAll(); refreshConversations(); }, [loadAll]);
   useEffect(() => { if (config?.defaultThinkingMode) setThinkingMode(config.defaultThinkingMode); }, [config?.defaultThinkingMode]);
   useEffect(() => { scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: 'smooth' }); }, [displayMessages]);
+  useEffect(() => { if (!input && inputRef.current) inputRef.current.style.height = 'auto'; }, [input]);
 
   const holdings = summary?.holdings || [];
   const latestContext = useMemo(() => buildPortfolioContext(holdings, config), [holdings, config]);
@@ -88,6 +108,17 @@ export default function AIAnalyst() {
     const firstUser = display.find((m) => m.role === 'user')?.content || input;
     await saveConversation({ id: convId, title: titleFrom(firstUser), messages: api, apiMessages: api, displayMessages: display, lastUsage: usage, createdAt: conversations.find((c) => c.id === convId)?.createdAt || Date.now() });
     await refreshConversations();
+  }
+
+  function resizeInput(target) {
+    target.style.height = 'auto';
+    target.style.height = `${Math.min(target.scrollHeight, 120)}px`;
+    target.style.overflowY = target.scrollHeight > 120 ? 'auto' : 'hidden';
+  }
+
+  function handleInput(event) {
+    setInput(event.target.value);
+    resizeInput(event.target);
   }
 
   async function send() {
@@ -203,7 +234,7 @@ export default function AIAnalyst() {
             <div className={`inline-block max-w-[90%] rounded-lg p-3 text-sm ${msg.role === 'user' ? 'bg-vscode-blue text-white' : 'bg-[#1e1e1e] text-gray-100'}`}>
               {msg.reasoning && <details className="my-2 rounded border border-vscode-border"><summary className="cursor-pointer px-3 py-1 text-sm text-gray-400">{msg.reasoningDone ? '▶ 查看思考过程' : '⏳ 思考中...'}</summary><pre className="whitespace-pre-wrap p-3 text-xs text-gray-500">{msg.reasoning}</pre></details>}
               {msg.toolEvents?.map((evt) => <div key={evt.callId} className="my-1 text-xs text-gray-400">{evt.status === 'running' ? `🔍 正在${getToolLabel(evt.name)}...` : evt.error ? `✗ ${getToolLabel(evt.name)}失败` : `✓ ${getToolLabel(evt.name)}完成`}</div>)}
-              <div className="whitespace-pre-wrap">{msg.content || (msg.status === 'streaming' ? '...' : '')}</div>
+              {msg.role === 'assistant' ? <div><ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>{msg.content || (msg.status === 'streaming' ? '...' : '')}</ReactMarkdown></div> : <div className="whitespace-pre-wrap">{msg.content}</div>}
               {msg.status === 'error' && <div className="mt-2 text-xs text-red-400">生成失败</div>}
               {msg.usage && <div className="mt-2 text-right text-xs text-gray-500">Input {msg.usage.prompt_tokens?.toLocaleString()} | Output {msg.usage.completion_tokens?.toLocaleString()} | Reasoning {msg.usage.reasoning_tokens?.toLocaleString()} tokens | ≈${estimateCost(msg.usage).toFixed(4)}</div>}
             </div>
@@ -213,7 +244,7 @@ export default function AIAnalyst() {
           {lastUsage && <div className="mb-2 text-right text-xs text-gray-500">Token消耗：{((lastUsage.prompt_tokens || 0) + (lastUsage.completion_tokens || 0) + (lastUsage.reasoning_tokens || 0)).toLocaleString()} | ≈${estimateCost(lastUsage).toFixed(4)}</div>}
           {error && <p className="danger mb-2">{error}</p>}
           <div className="flex gap-2">
-            <textarea className="input min-h-12 flex-1 resize-none" value={input} disabled={isStreaming} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="例如：本月新增1万元，优先买哪个方向？" />
+            <textarea ref={inputRef} rows={1} className="input flex-1 resize-none overflow-hidden leading-6" style={{ maxHeight: '120px' }} value={input} disabled={isStreaming} onInput={handleInput} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="例如：本月新增1万元，优先买哪个方向？" />
             <button className="btn px-6" disabled={isStreaming || !input.trim()} onClick={send}>{isStreaming ? '生成中' : '发送'}</button>
           </div>
         </div>
