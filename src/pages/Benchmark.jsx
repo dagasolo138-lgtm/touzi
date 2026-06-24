@@ -4,10 +4,10 @@ import { getNavHistory, getSnapshots, saveNav } from '../db/index.js';
 import { fetchNavHistory } from '../services/fundApi.js';
 
 const BENCHMARKS = [
-  { id: "csi300", name: "沪深300", code: "000051", color: "#f59e0b", desc: "华夏沪深300ETF联接A" },
-  { id: "nasdaq", name: "纳斯达克100", code: "040046", color: "#8b5cf6", desc: "华安纳斯达克100ETF联接A" },
-  { id: "bond", name: "中证全债", code: "000012", color: "#10b981", desc: "国泰中证全债指数" },
-  { id: "gold", name: "黄金", code: "004253", color: "#f97316", desc: "国泰黄金ETF联接C" },
+  { id: "csi300", name: "沪深300（代理）", code: "000051", color: "#f59e0b", desc: "华夏沪深300ETF联接A" },
+  { id: "nasdaq", name: "纳指100（代理）", code: "040046", color: "#8b5cf6", desc: "华安纳斯达克100ETF联接A" },
+  { id: "bond", name: "全债指数（代理）", code: "000012", color: "#10b981", desc: "国泰中证全债指数" },
+  { id: "gold", name: "黄金（代理）", code: "004253", color: "#f97316", desc: "国泰黄金ETF联接C" },
 ];
 
 const RANGES = [
@@ -145,7 +145,7 @@ export default function Benchmark() {
 
   return <div className="space-y-6">
     <header className="flex flex-wrap items-end justify-between gap-4">
-      <div><h2 className="text-2xl font-bold text-white">基准对比</h2><p className="mt-2 text-sm text-[#888888]">将组合与主流资产基准归一化到 100，对比区间内相对表现。</p></div>
+      <div><h2 className="text-2xl font-bold text-white">基准对比</h2><p className="mt-2 text-sm text-[#888888]">基准数据使用基金净值代替指数，存在跟踪误差；组合曲线为资产市值变化，包含新增投入，不代表投资收益率。</p></div>
       <div className="flex rounded-lg border border-[#333333] bg-[#111111] p-1">{RANGES.map((item) => <button key={item.id} className={`rounded-md px-3 py-1.5 text-sm ${range === item.id ? 'bg-[#3b82f6] text-white' : 'text-[#888888] hover:text-white'}`} onClick={() => setRange(item.id)}>{item.label}</button>)}</div>
     </header>
     {error && <div className="card border-red-500/40 bg-red-500/10 p-4 text-sm text-red-200">{error}</div>}
@@ -158,7 +158,7 @@ export default function Benchmark() {
         <LineChart data={chartData} margin={{ top: 8, right: 18, bottom: 8, left: 0 }}>
           <CartesianGrid stroke="#2a2a2a" />
           <XAxis dataKey="date" stroke="#888888" tick={{ fontSize: 12 }} />
-          <YAxis stroke="#888888" tickFormatter={fmtValue} domain={["dataMin - 2", "dataMax + 2"]} />
+          <YAxis stroke="#888888" tickFormatter={fmtValue} domain={["dataMin - 2", "dataMax + 2"]} label={{ value: '归一化值（起始=100）', angle: -90, position: 'insideLeft', fill: '#888888' }} />
           <Tooltip content={<CustomTooltip />} />
           <Legend onClick={(item) => setHidden((prev) => ({ ...prev, [item.dataKey]: !prev[item.dataKey] }))} />
           <Line name="我的组合" dataKey="portfolio" stroke="#ffffff" strokeWidth={2} dot={false} hide={hidden.portfolio} connectNulls />
