@@ -1,6 +1,117 @@
-import { getApiKey } from './exaSearch.js';
-export const SYSTEM_PROMPT = '你是一位服务于长期指数基金投资者的专业分析师。配置偏离是第一优先级，技术分析是第二优先级。使用中文，简洁直接，禁止使用稳赚、一定、必然等表达。';
-export const TOOLS = [{ type:'function', function:{ name:'exa_search', description:'搜索互联网获取实时信息。', parameters:{ type:'object', properties:{ query:{type:'string'}, type:{type:'string', enum:['auto','news']} }, required:['query'] } } }, { type:'function', function:{ name:'fetch_fund_nav_history', description:'获取基金历史净值。', parameters:{ type:'object', properties:{ code:{type:'string'}, days:{type:'number'} }, required:['code'] } } }, { type:'function', function:{ name:'get_portfolio_context', description:'获取当前完整持仓数据。', parameters:{ type:'object', properties:{} } } }];
-const THINKING_CONFIG = { disabled:{ thinking:{ type:'disabled' } }, high:{ thinking:{ type:'enabled' }, reasoning_effort:'high' }, max:{ thinking:{ type:'enabled' }, reasoning_effort:'max' } };
-export async function* callDeepSeek({ messages, systemPrompt = SYSTEM_PROMPT, thinkingMode = 'disabled', tools, onUsage }) { try { const response = await fetch('https://api.deepseek.com/v1/chat/completions', { method:'POST', headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${getApiKey('deepseek')}` }, body: JSON.stringify({ model:'deepseek-v4-pro', messages:[{role:'system', content:systemPrompt}, ...messages], max_tokens:8000, stream:true, stream_options:{ include_usage:true }, tools:tools || TOOLS, ...THINKING_CONFIG[thinkingMode] }) }); if (!response.ok || !response.body) throw new Error('DeepSeek 调用失败'); const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer=''; while (true) { const {done,value}=await reader.read(); if (done) break; buffer += decoder.decode(value,{stream:true}); const lines=buffer.split('\n'); buffer=lines.pop(); for (const line of lines) { if (!line.startsWith('data: ')) continue; const raw=line.slice(6); if (raw==='[DONE]') return; const chunk=JSON.parse(raw); if (chunk.usage) { onUsage?.(chunk.usage); continue; } const delta=chunk.choices?.[0]?.delta || {}; if (delta.content) yield {type:'text', content:delta.content}; if (delta.reasoning_content) yield {type:'reasoning', content:delta.reasoning_content}; if (delta.tool_calls) yield {type:'tool_call', calls:delta.tool_calls}; } } } catch (error) { throw new Error(error.message || 'DeepSeek 调用失败'); } }
-export function estimateCost(inputTokens=0, outputTokens=0) { return (inputTokens/1e6)*0.435 + (outputTokens/1e6)*0.87; }
+const MODEL = 'deepseek-v4-pro';
+const BASE_URL = 'https://api.deepseek.com';
+const MAX_TOOL_ROUNDS = 5;
+
+const THINKING_CONFIG = {
+  disabled: { thinking: { type: 'disabled' } },
+  high: { thinking: { type: 'enabled' }, reasoning_effort: 'high' },
+  max: { thinking: { type: 'enabled' }, reasoning_effort: 'max' },
+};
+
+export async function streamWithTools({ messages, systemPrompt, thinkingMode = 'disabled', tools, onChunk, executeTool }) {
+  const apiKey = localStorage.getItem('deepseekApiKey');
+  if (!apiKey) throw new Error('请先在设置页填写 DeepSeek API Key');
+
+  const config = THINKING_CONFIG[thinkingMode] || THINKING_CONFIG.disabled;
+  const currentMessages = [{ role: 'system', content: systemPrompt }, ...messages];
+  const totalUsage = { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 };
+  let toolRounds = 0;
+
+  while (toolRounds <= MAX_TOOL_ROUNDS) {
+    const { toolCalls, usage, assistantMessage } = await streamOnce({ messages: currentMessages, config, tools, onChunk, apiKey });
+    totalUsage.prompt_tokens += usage?.prompt_tokens || 0;
+    totalUsage.completion_tokens += usage?.completion_tokens || 0;
+    totalUsage.reasoning_tokens += usage?.reasoning_tokens || usage?.completion_tokens_details?.reasoning_tokens || 0;
+
+    if (!toolCalls || toolCalls.length === 0) break;
+    currentMessages.push(assistantMessage);
+
+    for (const call of toolCalls) {
+      onChunk?.({ type: 'tool_start', name: call.function.name, callId: call.id });
+      try {
+        const args = JSON.parse(call.function.arguments || '{}');
+        const result = await executeTool(call.function.name, args);
+        const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+        onChunk?.({ type: 'tool_result', callId: call.id, name: call.function.name, result: resultStr });
+        currentMessages.push({ role: 'tool', tool_call_id: call.id, content: resultStr });
+      } catch (e) {
+        const errStr = `工具执行失败：${e.message}`;
+        onChunk?.({ type: 'tool_result', callId: call.id, name: call.function.name, result: errStr, error: true });
+        currentMessages.push({ role: 'tool', tool_call_id: call.id, content: errStr });
+      }
+    }
+    toolRounds += 1;
+  }
+
+  onChunk?.({ type: 'done', usage: totalUsage });
+  return totalUsage;
+}
+
+async function streamOnce({ messages, config, tools, onChunk, apiKey }) {
+  const body = { model: MODEL, messages, stream: true, stream_options: { include_usage: true }, tools: tools?.length ? tools : undefined, tool_choice: tools?.length ? 'auto' : undefined, ...config };
+  const res = await fetch(`${BASE_URL}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify(body) });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `DeepSeek API错误 ${res.status}`);
+  }
+  if (!res.body) throw new Error('DeepSeek API未返回流式响应');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let usage = null;
+  const toolCallsMap = {};
+  let assistantContent = '';
+  let assistantReasoning = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const raw = line.slice(6).trim();
+      if (raw === '[DONE]') continue;
+      let chunk;
+      try { chunk = JSON.parse(raw); } catch { continue; }
+      if (chunk.usage) { usage = chunk.usage; continue; }
+      const delta = chunk.choices?.[0]?.delta;
+      if (!delta) continue;
+
+      if (delta.reasoning_content) {
+        assistantReasoning += delta.reasoning_content;
+        onChunk?.({ type: 'reasoning', content: delta.reasoning_content });
+      }
+      if (delta.content) {
+        assistantContent += delta.content;
+        onChunk?.({ type: 'text', content: delta.content });
+      }
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          if (!toolCallsMap[idx]) toolCallsMap[idx] = { id: tc.id || '', type: 'function', function: { name: '', arguments: '' } };
+          if (tc.id) toolCallsMap[idx].id = tc.id;
+          if (tc.function?.name) toolCallsMap[idx].function.name += tc.function.name;
+          if (tc.function?.arguments) toolCallsMap[idx].function.arguments += tc.function.arguments;
+        }
+      }
+    }
+  }
+
+  const toolCalls = Object.values(toolCallsMap);
+  return {
+    toolCalls,
+    usage,
+    assistantMessage: { role: 'assistant', content: assistantContent || null, ...(assistantReasoning ? { reasoning_content: assistantReasoning } : {}), ...(toolCalls.length ? { tool_calls: toolCalls } : {}) },
+  };
+}
+
+export function estimateCost(usageOrInput = 0, outputTokens = 0) {
+  const input = typeof usageOrInput === 'object' ? usageOrInput?.prompt_tokens || usageOrInput?.inputTokens || 0 : usageOrInput;
+  const output = typeof usageOrInput === 'object' ? usageOrInput?.completion_tokens || usageOrInput?.outputTokens || 0 : outputTokens;
+  return (input / 1e6) * 0.435 + (output / 1e6) * 0.87;
+}
