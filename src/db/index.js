@@ -11,7 +11,7 @@ const put = async (store, value) => (await dbPromise).put(store, value);
 const del = async (store, key) => (await dbPromise).delete(store, key);
 export async function getFunds(includeArchived = false) { const rows = await all('funds'); return includeArchived ? rows : rows.filter((f) => !f.archived); }
 export async function getFund(code) { return (await dbPromise).get('funds', code); }
-export async function saveFund(fund) { return put('funds', { archived: false, ...fund, createdAt: fund.createdAt || Date.now() }); }
+export async function saveFund(fund) { return put('funds', { archived: false, ...fund, purchaseFeeRate: fund.purchaseFeeRate ?? 0.0015, createdAt: fund.createdAt || Date.now() }); }
 export async function getTransactions() { return (await all('transactions')).sort((a, b) => b.date.localeCompare(a.date)); }
 export async function saveTransaction(tx) { return put('transactions', { id: tx.id || makeId(), fee: 0, notes: '', createdAt: Date.now(), ...tx }); }
 export async function deleteTransaction(id) { return del('transactions', id); }

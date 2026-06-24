@@ -116,6 +116,8 @@ export default function DCA() {
   const [transactions, setTransactions] = useState([]);
   const [editing, setEditing] = useState(null);
   const [executing, setExecuting] = useState(null);
+  const [executeError, setError] = useState('');
+  const [executeSaving, setExecuteSaving] = useState(false);
   const [expanded, setExpanded] = useState({});
   const todayStr = today();
 
@@ -152,16 +154,52 @@ export default function DCA() {
   }
 
   async function confirmExecute(payload) {
+    const today = new Date().toISOString().split('T')[0];
+    if (executing.lastExecutedDate === today) {
+      setError('今日已执行过该定投计划，请勿重复操作');
+      return;
+    }
+
+    const totalAmount = Number(payload.totalAmount) || 0;
+    const fee = Number(payload.fee) || 0;
     const price = Number(payload.price) || 0;
-    const amount = Number(payload.amount) || 0;
+    const amount = totalAmount - fee;
     const shares = Number(payload.shares) || (price ? amount / price : 0);
-    await saveTransaction({ date: todayStr, fundCode: executing.fundCode, type: 'buy', shares, price, amount, amountCents: yuanToCents(amount), fee: 0, feeCents: 0, notes: '定投执行' });
-    await saveDcaPlan({ ...executing, lastExecutedDate: todayStr, executionCount: (Number(executing.executionCount) || 0) + 1 });
-    setExecuting(null);
-    await load();
+
+    if (totalAmount <= 0) {
+      setError('计划金额必须大于0');
+      return;
+    }
+    if (fee < 0) {
+      setError('手续费不能小于0');
+      return;
+    }
+    if (amount <= 0) {
+      setError('扣除手续费后的确认金额必须大于0');
+      return;
+    }
+    if (price <= 0) {
+      setError('确认净值必须大于0');
+      return;
+    }
+    if (shares <= 0) {
+      setError('确认份额必须大于0');
+      return;
+    }
+
+    setExecuteSaving(true);
+    try {
+      await saveTransaction({ date: todayStr, fundCode: executing.fundCode, type: 'buy', shares, price, amount, amountCents: yuanToCents(amount), fee, feeCents: yuanToCents(fee), notes: '定投执行' });
+      await saveDcaPlan({ ...executing, lastExecutedDate: todayStr, executionCount: (Number(executing.executionCount) || 0) + 1 });
+      setExecuting(null);
+      setError('');
+      await load();
+    } finally {
+      setExecuteSaving(false);
+    }
   }
 
-  return <div className="space-y-6"><div className="flex items-center justify-between"><h2 className="text-2xl font-bold text-white">定投计划</h2><button className="btn" onClick={() => setEditing({ frequency: 'monthly', dayOfWeek: 1, dayOfMonth: 1, startDate: todayStr, status: 'active', note: '', amount: '', fundCode: funds[0]?.code || '' })}>+ 新建计划</button></div>{plans.length === 0 ? <div className="card p-8 text-center text-[#888888]">还没有定投计划，点击「新建计划」开始设置</div> : <div className="grid gap-4">{plans.map((plan) => { const due = isDueToday(plan, todayStr); const done = plan.lastExecutedDate === todayStr; const holding = summary.holdings.find((h) => h.code === plan.fundCode); const chartData = buildChartData(plan, navRows, transactions); const stats = executionStats(plan, transactions); const invested = stats.invested || (Number(plan.executionCount) || 0) * (Number(plan.amount) || 0); const roi = invested ? ((holding?.value || 0) / 100 - invested) / invested : 0; return <div className="card p-5" key={plan.id}>{due && <span className="pill mb-3 bg-[#1d4ed8] text-white">今日待执行</span>}{done && <span className="pill mb-3 bg-green-700 text-white">今日已执行</span>}<div className="flex flex-wrap items-start justify-between gap-4"><div><h3 className="text-lg font-semibold text-white">{plan.fundName} <span className="text-sm text-[#888888]">{plan.fundCode}</span></h3><p className="mt-2 text-sm text-[#888888]">{describeFrequency(plan)} · 每次金额 ¥{Number(plan.amount).toLocaleString('zh-CN')} · 下次执行：{formatDateLabel(getNextDueDate(plan, todayStr))}</p><span className={plan.status === 'active' ? 'pill mt-3 bg-green-900 text-green-200' : 'pill mt-3 bg-[#333333] text-[#bbbbbb]'}>{plan.status === 'active' ? '启用' : '暂停'}</span></div><div className="flex flex-wrap gap-2"><button className="btn" onClick={() => setExecuting(plan)}>执行</button><button className="btn2" onClick={() => setEditing(plan)}>编辑</button><button className="btn2" onClick={() => toggle(plan)}>{plan.status === 'active' ? '暂停' : '启用'}</button><button className="btn2 text-red-400" onClick={() => remove(plan)}>删除</button></div></div><button className="mt-4 text-sm text-[#3b82f6]" onClick={() => setExpanded((v) => ({ ...v, [plan.id]: !v[plan.id] }))}>{expanded[plan.id] ? '收起分析' : '展开分析'}</button>{expanded[plan.id] && <div className="mt-4 grid gap-4 md:grid-cols-2"><div className="grid gap-3 text-sm text-[#bbbbbb]"><p>累计执行次数：{stats.count || plan.executionCount || 0}</p><p>累计投入金额：¥{invested.toLocaleString('zh-CN')}</p><p>当前持仓市值：{formatMoney(holding?.value || 0)}</p><p>定投收益率：{(roi * 100).toFixed(2)}%</p><p>平均买入成本：¥{stats.avgCost.toFixed(4)}</p></div><div className="h-56"><ResponsiveContainer width="100%" height="100%"><LineChart data={chartData}><XAxis dataKey="date" stroke="#888" tick={{ fontSize: 11 }} /><YAxis stroke="#888" tick={{ fontSize: 11 }} /><Tooltip contentStyle={{ background: '#1e1e1e', border: '1px solid #333' }} formatter={(v, name) => [Number(v).toFixed(2), name === 'dca' ? '定投策略' : '一次性买入']} labelFormatter={(label) => `日期：${label}`} /><Line type="monotone" dataKey="dca" stroke="#3b82f6" dot={false} /><Line type="monotone" dataKey="lump" stroke="#f97316" strokeDasharray="4 4" dot={false} /></LineChart></ResponsiveContainer></div></div>}</div>; })}</div>}{editing && <PlanModal plan={editing} funds={funds} onClose={() => setEditing(null)} onSave={savePlan} />}{executing && <ExecuteModal plan={executing} navRows={navRows} hint={rsiHint(executing, navRows)} onClose={() => setExecuting(null)} onConfirm={confirmExecute} />}</div>;
+  return <div className="space-y-6"><div className="flex items-center justify-between"><h2 className="text-2xl font-bold text-white">定投计划</h2><button className="btn" onClick={() => setEditing({ frequency: 'monthly', dayOfWeek: 1, dayOfMonth: 1, startDate: todayStr, status: 'active', note: '', amount: '', fundCode: funds[0]?.code || '' })}>+ 新建计划</button></div>{plans.length === 0 ? <div className="card p-8 text-center text-[#888888]">还没有定投计划，点击「新建计划」开始设置</div> : <div className="grid gap-4">{plans.map((plan) => { const due = isDueToday(plan, todayStr); const done = plan.lastExecutedDate === todayStr; const holding = summary.holdings.find((h) => h.code === plan.fundCode); const chartData = buildChartData(plan, navRows, transactions); const stats = executionStats(plan, transactions); const invested = stats.invested || (Number(plan.executionCount) || 0) * (Number(plan.amount) || 0); const roi = invested ? ((holding?.value || 0) / 100 - invested) / invested : 0; return <div className="card p-5" key={plan.id}>{due && <span className="pill mb-3 bg-[#1d4ed8] text-white">今日待执行</span>}{done && <span className="pill mb-3 bg-green-700 text-white">今日已执行</span>}<div className="flex flex-wrap items-start justify-between gap-4"><div><h3 className="text-lg font-semibold text-white">{plan.fundName} <span className="text-sm text-[#888888]">{plan.fundCode}</span></h3><p className="mt-2 text-sm text-[#888888]">{describeFrequency(plan)} · 每次金额 ¥{Number(plan.amount).toLocaleString('zh-CN')} · 下次执行：{formatDateLabel(getNextDueDate(plan, todayStr))}</p><span className={plan.status === 'active' ? 'pill mt-3 bg-green-900 text-green-200' : 'pill mt-3 bg-[#333333] text-[#bbbbbb]'}>{plan.status === 'active' ? '启用' : '暂停'}</span></div><div className="flex flex-wrap gap-2"><button className="btn" onClick={() => { setError(''); setExecuting(plan); }}>执行</button><button className="btn2" onClick={() => setEditing(plan)}>编辑</button><button className="btn2" onClick={() => toggle(plan)}>{plan.status === 'active' ? '暂停' : '启用'}</button><button className="btn2 text-red-400" onClick={() => remove(plan)}>删除</button></div></div><button className="mt-4 text-sm text-[#3b82f6]" onClick={() => setExpanded((v) => ({ ...v, [plan.id]: !v[plan.id] }))}>{expanded[plan.id] ? '收起分析' : '展开分析'}</button>{expanded[plan.id] && <div className="mt-4 grid gap-4 md:grid-cols-2"><div className="grid gap-3 text-sm text-[#bbbbbb]"><p>累计执行次数：{stats.count || plan.executionCount || 0}</p><p>累计投入金额：¥{invested.toLocaleString('zh-CN')}</p><p>当前持仓市值：{formatMoney(holding?.value || 0)}</p><p>定投收益率：{(roi * 100).toFixed(2)}%</p><p>平均买入成本：¥{stats.avgCost.toFixed(4)}</p></div><div className="h-56"><ResponsiveContainer width="100%" height="100%"><LineChart data={chartData}><XAxis dataKey="date" stroke="#888" tick={{ fontSize: 11 }} /><YAxis stroke="#888" tick={{ fontSize: 11 }} /><Tooltip contentStyle={{ background: '#1e1e1e', border: '1px solid #333' }} formatter={(v, name) => [Number(v).toFixed(2), name === 'dca' ? '定投策略' : '一次性买入']} labelFormatter={(label) => `日期：${label}`} /><Line type="monotone" dataKey="dca" stroke="#3b82f6" dot={false} /><Line type="monotone" dataKey="lump" stroke="#f97316" strokeDasharray="4 4" dot={false} /></LineChart></ResponsiveContainer></div></div>}</div>; })}</div>}{editing && <PlanModal plan={editing} funds={funds} onClose={() => setEditing(null)} onSave={savePlan} />}{executing && <ExecuteModal plan={executing} fund={funds.find((f) => f.code === executing.fundCode)} navRows={navRows} hint={rsiHint(executing, navRows)} error={executeError} saving={executeSaving} onClose={() => { setExecuting(null); setError(''); }} onConfirm={confirmExecute} />}</div>;
 }
 
 function PlanModal({ plan, funds, onClose, onSave }) {
@@ -170,9 +208,23 @@ function PlanModal({ plan, funds, onClose, onSave }) {
   return <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4"><form className="card grid w-full max-w-lg gap-3 p-5" onSubmit={(e) => { e.preventDefault(); onSave({ id: form.id || makeId(), createdAt: form.createdAt || Date.now(), lastExecutedDate: form.lastExecutedDate || null, executionCount: form.executionCount || 0, ...form }); }}><h3 className="text-xl font-semibold text-white">{form.id ? '编辑计划' : '新建计划'}</h3><select className="input" value={form.fundCode} onChange={e => set('fundCode', e.target.value)}>{funds.map(f => <option key={f.code} value={f.code}>{f.code} {f.name}</option>)}</select><input className="input" type="number" min="0" step="0.01" placeholder="每次金额" value={form.amount} onChange={e => set('amount', e.target.value)} required /><select className="input" value={form.frequency} onChange={e => set('frequency', e.target.value)}><option value="daily">每个工作日</option><option value="weekly">每周</option><option value="biweekly">每两周</option><option value="monthly">每月</option></select>{['weekly', 'biweekly'].includes(form.frequency) && <select className="input" value={form.dayOfWeek} onChange={e => set('dayOfWeek', e.target.value)}>{WEEKDAYS.map((w, i) => <option key={w} value={i}>{w}</option>)}</select>}{form.frequency === 'monthly' && <input className="input" type="number" min="1" max="31" value={form.dayOfMonth} onChange={e => set('dayOfMonth', e.target.value)} />}<input className="input" type="date" value={form.startDate} onChange={e => set('startDate', e.target.value)} /><input className="input" placeholder="备注" value={form.note || ''} onChange={e => set('note', e.target.value)} /><div className="flex justify-end gap-2"><button type="button" className="btn2" onClick={onClose}>取消</button><button className="btn">保存</button></div></form></div>;
 }
 
-function ExecuteModal({ plan, navRows, hint, onClose, onConfirm }) {
+function ExecuteModal({ plan, fund, navRows, hint, error, saving, onClose, onConfirm }) {
   const latest = navRows.filter((r) => r.fundCode === plan.fundCode).sort((a, b) => b.date.localeCompare(a.date))[0];
-  const [form, setForm] = useState({ amount: plan.amount, price: latest?.nav || '', shares: latest?.nav ? (Number(plan.amount) / Number(latest.nav)).toFixed(4) : '' });
-  const set = (k, v) => setForm((old) => ({ ...old, [k]: v, ...(k === 'amount' || k === 'price' ? { shares: Number(k === 'price' ? v : old.price) ? (Number(k === 'amount' ? v : old.amount) / Number(k === 'price' ? v : old.price)).toFixed(4) : old.shares } : {}) }));
-  return <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4"><form className="card grid w-full max-w-lg gap-3 p-5" onSubmit={(e) => { e.preventDefault(); onConfirm(form); }}><h3 className="text-xl font-semibold text-white">执行定投</h3><p className="text-[#bbbbbb]">{plan.fundName} · 计划金额 ¥{Number(plan.amount).toLocaleString('zh-CN')}</p><p className={hint.cls}>{hint.text}</p><input className="input" type="number" step="0.01" value={form.amount} onChange={e => set('amount', e.target.value)} /><input className="input" type="number" step="0.0001" placeholder="净值" value={form.price} onChange={e => set('price', e.target.value)} /><input className="input" type="number" step="0.0001" placeholder="份额" value={form.shares} onChange={e => set('shares', e.target.value)} /><div className="flex justify-end gap-2"><button type="button" className="btn2" onClick={onClose}>取消</button><button className="btn">确认执行</button></div></form></div>;
+  const feeRate = Number(fund?.purchaseFeeRate ?? 0.0015);
+  const initialTotal = Number(plan.amount) || 0;
+  const initialFee = initialTotal * feeRate;
+  const initialPrice = latest?.nav || '';
+  const calcShares = (totalAmount, fee, price) => {
+    const netAmount = Number(totalAmount) - Number(fee);
+    const nav = Number(price);
+    return nav > 0 && netAmount > 0 ? (netAmount / nav).toFixed(4) : '';
+  };
+  const [form, setForm] = useState({ totalAmount: plan.amount, fee: initialFee.toFixed(2), price: initialPrice, shares: calcShares(initialTotal, initialFee, initialPrice) });
+  const set = (k, v) => setForm((old) => {
+    const next = { ...old, [k]: v };
+    if (k === 'totalAmount') next.fee = (Number(v || 0) * feeRate).toFixed(2);
+    if (['totalAmount', 'fee', 'price'].includes(k)) next.shares = calcShares(next.totalAmount, next.fee, next.price);
+    return next;
+  });
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4"><form className="card grid w-full max-w-lg gap-3 p-5" onSubmit={(e) => { e.preventDefault(); onConfirm(form); }}><h3 className="text-xl font-semibold text-white">执行定投</h3><p className="text-[#bbbbbb]">{plan.fundName} · 计划金额 ¥{Number(plan.amount).toLocaleString('zh-CN')}</p><p className={hint.cls}>{hint.text}</p>{error && <p className="danger">{error}</p>}<input className="input" type="number" step="0.01" placeholder="计划金额" value={form.totalAmount} onChange={e => set('totalAmount', e.target.value)} /><label className="grid gap-1"><input className="input" type="number" step="0.01" min="0" placeholder="手续费" value={form.fee} onChange={e => set('fee', e.target.value)} /><span className="text-xs text-[#888888]">费率 {(feeRate * 100).toFixed(2)}%</span></label><input className="input" type="number" step="0.0001" placeholder="确认净值" value={form.price} onChange={e => set('price', e.target.value)} /><input className="input" type="number" step="0.0001" placeholder="确认份额" value={form.shares} onChange={e => set('shares', e.target.value)} /><div className="flex justify-end gap-2"><button type="button" className="btn2" onClick={onClose}>取消</button><button className="btn" disabled={saving}>{saving ? '执行中...' : '确认执行'}</button></div></form></div>;
 }
