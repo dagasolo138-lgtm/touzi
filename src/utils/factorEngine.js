@@ -9,6 +9,7 @@ export const DEFAULT_FACTOR_SETTINGS = {
   priceWeight: 0.35,
   categorySignalFunds: { A股: '', QDII: '', 债券: '', 黄金: '' },
   expectedNavLagDays: { A股: 3, QDII: 5, 债券: 3, 黄金: 5 },
+  maxInternalGapDays: 14,
 };
 
 const DAY_MS = 86400000;
@@ -102,7 +103,12 @@ export function calcRSIValue(navRows, period = 14) {
 
 export function calcDataConfidence({ navRows = [], asOfDate, category, signalFundCode, settings = {} } = {}) {
   const cfg = mergeFactorSettings(settings);
-  const rows = normalizeNavHistory(navRows, asOfDate);
+  const cutoff = toDateOnly(asOfDate);
+  const rawRows = navRows.filter((row) => {
+    const date = toDateOnly(row.date || row.navDate);
+    return date && date <= cutoff;
+  });
+  const rows = normalizeNavHistory(rawRows, asOfDate);
   const flags = [];
   let score = 100;
   if (!signalFundCode) { flags.push('SIGNAL_FUND_MISSING'); score -= 60; }
@@ -111,8 +117,21 @@ export function calcDataConfidence({ navRows = [], asOfDate, category, signalFun
     const latest = rows.at(-1).date;
     const lag = Math.floor((new Date(`${toDateOnly(asOfDate)}T00:00:00Z`) - new Date(`${latest}T00:00:00Z`)) / DAY_MS);
     if (lag > Number(cfg.expectedNavLagDays[category] ?? 3)) { flags.push('NAV_STALE'); score -= 35; }
-    const uniqueRatio = new Set(rows.map((row) => row.date)).size / rows.length;
-    if (uniqueRatio < 0.98 || rows.some((row) => !validNav(row))) { flags.push('DATA_GAP'); score -= 15; }
+    const invalidCount = rawRows.filter((row) => !validNav(row)).length;
+    const seenDates = new Set();
+    const duplicateCount = rawRows.filter((row) => {
+      const date = toDateOnly(row.date || row.navDate);
+      if (!date || !validNav(row)) return false;
+      if (seenDates.has(date)) return true;
+      seenDates.add(date);
+      return false;
+    }).length;
+    let maxGapDays = 0;
+    for (let i = 1; i < rows.length; i += 1) {
+      const gap = Math.floor((new Date(`${rows[i].date}T00:00:00Z`) - new Date(`${rows[i - 1].date}T00:00:00Z`)) / DAY_MS);
+      maxGapDays = Math.max(maxGapDays, gap);
+    }
+    if (invalidCount > 0 || duplicateCount > 0 || maxGapDays > Number(cfg.maxInternalGapDays ?? 14)) { flags.push('DATA_GAP'); score -= 15; }
   } else { flags.push('NO_NAV_DATA'); score -= 60; }
   return { score: clamp(Math.round(score), 0, 100), flags };
 }
@@ -151,7 +170,7 @@ export function buildFactorSnapshot({ category, signalFundCode, navRows = [], ac
   const cfg = mergeFactorSettings(settings);
   const rows = normalizeNavHistory(navRows, asOfDate);
   const allocationPriority = calcAllocationPriority(actualWeight, targetWeight);
-  const dataConfidence = calcDataConfidence({ navRows: rows, asOfDate, category, signalFundCode, settings: cfg });
+  const dataConfidence = calcDataConfidence({ navRows, asOfDate, category, signalFundCode, settings: cfg });
   const priceCondition = signalFundCode ? calcPriceCondition(rows, cfg) : { score: null, details: null, raw: {}, insufficientReasons: ['SIGNAL_FUND_MISSING'] };
   const trendState = calcTrendState(rows, cfg.trendFast, cfg.trendSlow);
   const volatilityState = calcVolatilityState(rows, 30);
