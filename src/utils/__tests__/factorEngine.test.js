@@ -74,3 +74,38 @@ describe('factorEngine', () => {
     expect(tx.amount).toBe(1000);
   });
 });
+
+describe('DATA_GAP detection', () => {
+  it('flags invalid nav rows', () => {
+    const snapshot = buildFactorSnapshot({ category: 'A股', signalFundCode: '000001', navRows: [...rows(260), { date: '2024-10-01', nav: 0 }], asOfDate: '2024-10-01' });
+    expect(snapshot.flags).toContain('DATA_GAP');
+  });
+
+  it('flags duplicate valid dates', () => {
+    const navRows = [...rows(260), { date: day(260), nav: 999 }];
+    const snapshot = buildFactorSnapshot({ category: 'A股', signalFundCode: '000001', navRows, asOfDate: day(260) });
+    expect(snapshot.flags).toContain('DATA_GAP');
+  });
+
+  it('flags internal gaps over 14 days', () => {
+    const navRows = [...rows(100)];
+    const start = new Date('2025-01-16T00:00:00Z');
+    for (let i = 0; i < 160; i += 1) {
+      const d = new Date(start.getTime() + i * 86400000);
+      navRows.push({ date: d.toISOString().slice(0, 10), nav: 200 + i });
+    }
+    const snapshot = buildFactorSnapshot({ category: 'A股', signalFundCode: '000001', navRows, asOfDate: '2025-06-24' });
+    expect(snapshot.flags).toContain('DATA_GAP');
+  });
+
+  it('does not flag normal weekend gaps', () => {
+    const navRows = [];
+    const start = new Date('2024-01-01T00:00:00Z');
+    for (let i = 0; navRows.length < 260; i += 1) {
+      const d = new Date(start.getTime() + i * 86400000);
+      if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) navRows.push({ date: d.toISOString().slice(0, 10), nav: 100 + navRows.length });
+    }
+    const snapshot = buildFactorSnapshot({ category: 'A股', signalFundCode: '000001', navRows, asOfDate: navRows.at(-1).date });
+    expect(snapshot.flags).not.toContain('DATA_GAP');
+  });
+});

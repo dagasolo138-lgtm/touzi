@@ -83,6 +83,31 @@ async function fetchFundNavHistory(code, days, proxyUrl) {
   return data.history || [];
 }
 
+
+const trendText = { bullish: '偏强', bearish: '偏弱', neutral: '中性', insufficient: '数据不足' };
+
+export function buildFactorContext(factorResult) {
+  const lines = [
+    '【量化辅助数据】',
+    '量化辅助数据，不是预测结论，不可替代事实核验，不可触发自动交易。',
+  ];
+  const snapshots = factorResult?.snapshots || [];
+  if (!snapshots.length) return [...lines, '暂无类别因子快照。'].join('\n');
+  snapshots.forEach((snapshot) => {
+    const fund = factorResult?.fundsByCode?.[snapshot.signalFundCode];
+    lines.push(snapshot.category);
+    lines.push(`- 信号基金：${snapshot.signalFundCode || '未配置'} ${fund?.name || ''}`.trim());
+    lines.push(`- 配置优先级：${snapshot.allocationPriority ?? '数据不足'}`);
+    lines.push(`- 价格状态分：${snapshot.priceCondition?.score ?? '数据不足'}`);
+    lines.push(`- 行动优先级：${snapshot.actionPriority ?? '数据不足'}`);
+    lines.push(`- 数据置信度：${snapshot.dataConfidence?.score ?? '数据不足'}`);
+    lines.push(`- 趋势：${trendText[snapshot.trendState?.state] || '数据不足'}`);
+    lines.push(`- 风险标记：${snapshot.flags?.length ? snapshot.flags.join('、') : '无'}`);
+    lines.push(`- 行动说明：${snapshot.explanation || '数据不足，暂不生成行动提示'}`);
+  });
+  return lines.join('\n');
+}
+
 export function buildPortfolioContext(holdings = [], config) {
   const totalValue = holdings.reduce((s, h) => s + (h.value || 0), 0);
   const byCategory = (config?.categories || []).map((cat) => {
@@ -94,5 +119,5 @@ export function buildPortfolioContext(holdings = [], config) {
     return `${cat}：实际${actual}% / 目标${target}% / 偏离${diff > 0 ? '+' : ''}${diff}%`;
   });
   const holdingLines = holdings.map((h) => `  - ${h.name}(${h.code})：市值¥${((h.value || 0) / 100).toFixed(2)}，盈亏${((h.pnlPct || 0) * 100).toFixed(2)}%，净值${h.nav ?? '暂无'}`);
-  return ['【当前组合快照】', `总市值：¥${(totalValue / 100).toFixed(2)}`, '', '配置情况：', ...byCategory, '', '各持仓：', ...(holdingLines.length ? holdingLines : ['  - 暂无持仓']), '', '【量化辅助数据】', 'factorSettings=' + JSON.stringify(config?.factorSettings || {}), '说明：因子评分仅供辅助，100分始终表示对新增资金更有吸引力；不能代替事实核验和投资建议，也不能触发自动交易。', '', `数据时间：${new Date().toLocaleString('zh-CN')}`].join('\n');
+  return ['【当前组合快照】', `总市值：¥${(totalValue / 100).toFixed(2)}`, '', '配置情况：', ...byCategory, '', '各持仓：', ...(holdingLines.length ? holdingLines : ['  - 暂无持仓']), '', `数据时间：${new Date().toLocaleString('zh-CN')}`].join('\n');
 }

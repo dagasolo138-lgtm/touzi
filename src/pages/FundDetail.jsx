@@ -14,8 +14,8 @@ import TransactionForm from '../components/TransactionForm.jsx';
 import { getConfig, getFund, getFunds, getNavHistory, getTransactions, saveNav } from '../db/index.js';
 import { fetchNavHistory } from '../services/fundApi.js';
 import { formatMoney, formatNav, formatPct, yuanToCents } from '../utils/formatters.js';
-import { buildPortfolio, categoryBreakdown } from '../utils/positionEngine.js';
 import { buildFactorSnapshot } from '../utils/factorEngine.js';
+import { buildCategoryFactorSnapshots } from '../services/factorContext.js';
 
 const RANGE_OPTIONS = [
   ['1m', '1月', 30],
@@ -71,6 +71,7 @@ export default function FundDetail() {
   const [funds, setFunds] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [navHistory, setNavHistory] = useState([]);
+  const [allNavRows, setAllNavRows] = useState([]);
   const [range, setRange] = useState('3m');
   const [showMA, setShowMA] = useState({ ma5: true, ma20: true, ma60: true });
   const [showTxModal, setShowTxModal] = useState(false);
@@ -87,6 +88,7 @@ export default function FundDetail() {
       setFund(fundRow || { code, name: `基金 ${code}`, category: '未分类' });
       setFunds(fundRows);
       setTransactions(txRows.filter((tx) => tx.fundCode === code));
+      setAllNavRows(navRows);
       setNavHistory(navRows.filter((nav) => nav.fundCode === code).sort((a, b) => a.date.localeCompare(b.date)));
       setConfig(cfg);
       setError('');
@@ -153,16 +155,18 @@ export default function FundDetail() {
 
   const priceSnapshot = useMemo(() => {
     if (!fund || !config) return null;
-    const latestMap = navHistory.length ? { [code]: latestNavRow } : {};
-    const allPortfolio = buildPortfolio(funds, transactions, latestMap);
-    const breakdown = categoryBreakdown(allPortfolio.holdings, config.categories, config.targetAllocation);
-    return buildFactorSnapshot({ category: fund.category, signalFundCode: code, navRows: navHistory, actualWeight: breakdown[fund.category]?.weight || 0, targetWeight: breakdown[fund.category]?.targetWeight || 0, asOfDate: new Date().toISOString().slice(0, 10), settings: config.factorSettings });
-  }, [code, config, fund, funds, latestNavRow, navHistory, transactions]);
+    return buildFactorSnapshot({ category: fund.category, signalFundCode: code, navRows: navHistory, actualWeight: 0, targetWeight: 0, asOfDate: new Date().toISOString().slice(0, 10), settings: config.factorSettings });
+  }, [code, config, fund, navHistory]);
+
+  const categoryFactorSnapshot = useMemo(() => {
+    if (!fund || !config) return null;
+    return buildCategoryFactorSnapshots({ config, funds, transactions, navRows: allNavRows, asOfDate: new Date().toISOString().slice(0, 10) }).snapshotsByCategory[fund.category] || null;
+  }, [allNavRows, config, fund, funds, transactions]);
 
   async function refreshHistory() {
     setRefreshing(true);
     try {
-      const rows = await fetchNavHistory(code, 180);
+      const rows = await fetchNavHistory(code, 420);
       await Promise.all(rows.filter((row) => row.date).map((row) => saveNav({ fundCode: code, date: row.date, nav: Number(row.nav ?? row.unitNetWorth ?? row.netValue ?? 0), source: 'api' })));
       await load();
     } catch (err) {
@@ -200,14 +204,29 @@ export default function FundDetail() {
 
 
     <section className="card p-4">
-      <button className="flex w-full items-center justify-between text-left font-semibold text-white" onClick={() => setShowPriceState((value) => !value)}><span>价格状态</span><span className="text-[#888888]">{showPriceState ? '收起' : '展开'}</span></button>
+      <button className="flex w-full items-center justify-between text-left font-semibold text-white" onClick={() => setShowPriceState((value) => !value)}><span>本基金价格状态</span><span className="text-[#888888]">{showPriceState ? '收起' : '展开'}</span></button>
       {showPriceState && <div className="mt-4 grid gap-3 text-sm text-[#d4d4d4] md:grid-cols-3">
         <p>价格状态分：{priceSnapshot?.priceCondition.score == null ? '数据不足' : priceSnapshot.priceCondition.score}</p>
         <p>价格位置分位数：{priceSnapshot?.priceCondition.raw?.percentile == null ? '数据不足' : `${(priceSnapshot.priceCondition.raw.percentile * 100).toFixed(1)}%`}</p>
         <p>距窗口高点回撤：{priceSnapshot?.priceCondition.raw?.drawdown == null ? '数据不足' : `${(priceSnapshot.priceCondition.raw.drawdown * 100).toFixed(1)}%`}</p>
         <p>RSI：{priceSnapshot?.priceCondition.raw?.rsi == null ? '数据不足' : priceSnapshot.priceCondition.raw.rsi.toFixed(1)}</p>
-        <p>数据置信度：{priceSnapshot?.dataConfidence.score ?? '数据不足'}</p>
-        <p>行动说明：{priceSnapshot?.explanation || '数据不足，暂不生成行动提示'}</p>
+        <p>MA60：{priceSnapshot?.trendState.ma60 == null ? '数据不足' : priceSnapshot.trendState.ma60.toFixed(4)}</p>
+        <p>MA120：{priceSnapshot?.trendState.ma120 == null ? '数据不足' : priceSnapshot.trendState.ma120.toFixed(4)}</p>
+        <p>数据质量：{priceSnapshot?.dataConfidence.flags?.length ? priceSnapshot.dataConfidence.flags.join('、') : '正常'}</p>
+      </div>}
+    </section>
+
+    <section className="card p-4">
+      <button className="flex w-full items-center justify-between text-left font-semibold text-white" onClick={() => setShowPriceState((value) => !value)}><span>所属类别因子状态</span><span className="text-[#888888]">{showPriceState ? '收起' : '展开'}</span></button>
+      {showPriceState && <div className="mt-4 grid gap-3 text-sm text-[#d4d4d4] md:grid-cols-2">
+        <p>当前类别配置优先级：{categoryFactorSnapshot?.allocationPriority ?? '数据不足'}</p>
+        <p>信号基金：{categoryFactorSnapshot?.signalFundCode || '未配置'} {funds.find((item) => item.code === categoryFactorSnapshot?.signalFundCode)?.name || ''}</p>
+        {categoryFactorSnapshot?.signalFundCode && categoryFactorSnapshot.signalFundCode !== code && <p className="md:col-span-2 text-yellow-100">本基金不是该类别的价格信号基金；类别判断基于：{categoryFactorSnapshot.signalFundCode} {funds.find((item) => item.code === categoryFactorSnapshot.signalFundCode)?.name || ''}</p>}
+        <p>类别价格状态分：{categoryFactorSnapshot?.priceCondition.score ?? '数据不足'}</p>
+        <p>类别行动优先级：{categoryFactorSnapshot?.actionPriority ?? '数据不足'}</p>
+        <p>数据置信度：{categoryFactorSnapshot?.dataConfidence.score ?? '数据不足'}</p>
+        <p>风险标记：{categoryFactorSnapshot?.flags?.length ? categoryFactorSnapshot.flags.join('、') : '暂无'}</p>
+        <p className="md:col-span-2">行动说明：{categoryFactorSnapshot?.explanation || '数据不足，暂不生成行动提示'}</p>
       </div>}
     </section>
 

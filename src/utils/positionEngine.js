@@ -38,7 +38,8 @@ export function buildPortfolio(funds = [], transactions = [], navMap = {}) {
 
       if (tx.type === 'sell') {
         const avgCost = shares > 0 ? totalCost / shares : 0;
-        const sellProceeds = amount;
+        const sellFee = txFeeCents(tx);
+        const sellProceeds = amount - sellFee;
         const costBasis = avgCost * txShares;
         shares -= txShares;
         totalCost -= costBasis;

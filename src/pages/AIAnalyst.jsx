@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { clearAllConversations, deleteConversation, getConfig, getConversation, getConversations, saveAiLog, saveConversation } from '../db/index.js';
+import { clearAllConversations, deleteConversation, getConfig, getConversation, getConversations, getFunds, getNavHistory, getTransactions, saveAiLog, saveConversation } from '../db/index.js';
 import { estimateCost, streamWithTools } from '../services/deepseek.js';
 import { ANALYST_SYSTEM_PROMPT, TRIAGE_PROMPT } from '../services/analystPrompt.js';
 import { runStep, runNewCapital, runFundDive, runHealthCheck } from '../services/skillPipelines.js';
-import { TOOL_DEFINITIONS, buildPortfolioContext, executeTool as runTool, exaSearch } from '../services/exaSearch.js';
+import { TOOL_DEFINITIONS, buildFactorContext, buildPortfolioContext, executeTool as runTool, exaSearch } from '../services/exaSearch.js';
+import { buildCategoryFactorSnapshots } from '../services/factorContext.js';
 import { fetchNavHistory } from '../services/fundApi.js';
 import { useStore } from '../store/useStore.js';
 import { makeId } from '../utils/formatters.js';
@@ -207,7 +208,10 @@ export default function AIAnalyst() {
     const userDisplay = { id: makeId(), role: 'user', content: q, reasoning: '', reasoningDone: true, toolEvents: [], status: 'done', timestamp: Date.now() };
     const assistantId = makeId();
     const assistantDisplay = { id: assistantId, role: 'assistant', content: '', reasoning: '', reasoningDone: true, toolEvents: [], status: 'streaming', timestamp: Date.now() };
-    const contextMessage = { role: 'system', content: latestContext };
+    const [freshCfg, freshFunds, freshTx, freshNavRows] = await Promise.all([getConfig(), getFunds(), getTransactions(), getNavHistory()]);
+    const factorResult = buildCategoryFactorSnapshots({ config: freshCfg, funds: freshFunds, transactions: freshTx, navRows: freshNavRows, asOfDate: new Date().toISOString().slice(0, 10) });
+    factorResult.fundsByCode = Object.fromEntries(freshFunds.map((fund) => [fund.code, fund]));
+    const contextMessage = { role: 'system', content: `${buildPortfolioContext(holdings, config)}\n\n${buildFactorContext(factorResult)}` };
     const userApiMessage = { role: 'user', content: q };
     const nextDisplay = [...displayMessages, userDisplay, assistantDisplay];
     const nextApi = [...apiMessages, contextMessage, userApiMessage];
