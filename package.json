@@ -1,1 +1,31 @@
-{"name":"investment-dashboard","version":"0.1.0","private":true,"type":"module","scripts":{"dev":"vite","build":"vite build","preview":"vite preview"},"dependencies":{"@vitejs/plugin-react":"^4.3.4","clsx":"^2.1.1","idb":"^7.1.1","react":"^18.3.1","react-dom":"^18.3.1","react-markdown":"^10.1.0","react-router-dom":"^6.28.0","recharts":"^2.13.3","remark-gfm":"^4.0.1","tailwindcss":"^3.4.17","zustand":"^4.5.5"},"devDependencies":{"autoprefixer":"^10.4.20","postcss":"^8.4.49","vite":"^5.4.11"}}
+{
+  "name": "investment-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "clsx": "^2.1.1",
+    "idb": "^7.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^6.28.0",
+    "recharts": "^2.13.3",
+    "remark-gfm": "^4.0.1",
+    "tailwindcss": "^3.4.17",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}

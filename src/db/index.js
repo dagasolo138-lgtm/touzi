@@ -1,9 +1,10 @@
 import { openDB } from 'idb';
 import { today, makeId } from '../utils/formatters.js';
+import { DEFAULT_FACTOR_SETTINGS, mergeFactorSettings } from '../utils/factorEngine.js';
 
 const DB_NAME = 'investment-db';
 const DB_VERSION = 3;
-export const DEFAULT_CONFIG = { id: 'singleton', targetAllocation: { A股: 0.25, QDII: 0.3, 债券: 0.3, 黄金: 0.15 }, categories: ['A股', 'QDII', '债券', '黄金'], proxyUrl: '', defaultThinkingMode: 'disabled', updatedAt: Date.now() };
+export const DEFAULT_CONFIG = { id: 'singleton', targetAllocation: { A股: 0.25, QDII: 0.3, 债券: 0.3, 黄金: 0.15 }, categories: ['A股', 'QDII', '债券', '黄金'], proxyUrl: '', defaultThinkingMode: 'disabled', factorSettings: DEFAULT_FACTOR_SETTINGS, updatedAt: Date.now() };
 
 export const dbPromise = openDB(DB_NAME, DB_VERSION, { upgrade(db) { if (!db.objectStoreNames.contains('funds')) db.createObjectStore('funds', { keyPath: 'code' }); if (!db.objectStoreNames.contains('transactions')) { const s = db.createObjectStore('transactions', { keyPath: 'id' }); s.createIndex('fundCode', 'fundCode'); s.createIndex('date', 'date'); } if (!db.objectStoreNames.contains('navHistory')) { const s = db.createObjectStore('navHistory', { keyPath: 'id' }); s.createIndex('fundCode', 'fundCode'); s.createIndex('date', 'date'); } if (!db.objectStoreNames.contains('snapshots')) db.createObjectStore('snapshots', { keyPath: 'date' }); if (!db.objectStoreNames.contains('aiLogs')) db.createObjectStore('aiLogs', { keyPath: 'id' }); if (!db.objectStoreNames.contains('conversations')) { const s = db.createObjectStore('conversations', { keyPath: 'id' }); s.createIndex('updatedAt', 'updatedAt'); } if (!db.objectStoreNames.contains('config')) db.createObjectStore('config', { keyPath: 'id' }); if (!db.objectStoreNames.contains('dcaPlans')) db.createObjectStore('dcaPlans', { keyPath: 'id' }); } });
 const all = async (store) => (await dbPromise).getAll(store);
@@ -32,7 +33,7 @@ export async function getDcaPlans() { return (await all('dcaPlans')).sort((a, b)
 export async function getDcaPlan(id) { return (await dbPromise).get('dcaPlans', id); }
 export async function saveDcaPlan(plan) { return put('dcaPlans', { note: '', status: 'active', lastExecutedDate: null, executionCount: 0, createdAt: Date.now(), ...plan, id: plan.id || makeId() }); }
 export async function deleteDcaPlan(id) { return del('dcaPlans', id); }
-export async function getConfig() { return (await (await dbPromise).get('config', 'singleton')) || DEFAULT_CONFIG; }
+export async function getConfig() { const config = (await (await dbPromise).get('config', 'singleton')) || DEFAULT_CONFIG; return { ...DEFAULT_CONFIG, ...config, factorSettings: mergeFactorSettings(config.factorSettings || {}) }; }
 export async function saveConfig(config) { return put('config', { ...(await getConfig()), ...config, id: 'singleton', updatedAt: Date.now() }); }
 export async function exportData() { return { funds: await all('funds'), transactions: await all('transactions'), navHistory: await all('navHistory'), snapshots: await all('snapshots'), aiLogs: await all('aiLogs'), conversations: await all('conversations'), dcaPlans: await all('dcaPlans') }; }
 export async function importData(data) { const db = await dbPromise; const tx = db.transaction(['funds', 'transactions', 'navHistory', 'snapshots', 'aiLogs', 'conversations', 'dcaPlans'], 'readwrite'); for (const store of tx.objectStoreNames) for (const item of data[store] || []) await tx.objectStore(store).put(item); await tx.done; }
