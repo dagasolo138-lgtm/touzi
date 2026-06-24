@@ -51,7 +51,7 @@ export const TOOL_DEFINITIONS = [
 export async function executeTool(toolName, toolArgs, { proxyUrl, holdings, config }) {
   switch (toolName) {
     case 'exa_search':
-      return await exaSearch(toolArgs.query, toolArgs.category);
+      return await exaSearch(toolArgs.query, toolArgs.category, proxyUrl);
     case 'fetch_fund_nav_history':
       return await fetchFundNavHistory(toolArgs.code, toolArgs.days || 60, proxyUrl);
     case 'get_portfolio_context':
@@ -61,16 +61,16 @@ export async function executeTool(toolName, toolArgs, { proxyUrl, holdings, conf
   }
 }
 
-export async function exaSearch(query, category = 'general') {
+export async function exaSearch(query, category = 'general', proxyUrl) {
   const apiKey = localStorage.getItem('exaApiKey');
   if (!apiKey) throw new Error('请先在设置页填写 Exa API Key');
-  const res = await fetch('https://api.exa.ai/search', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-    body: JSON.stringify({ query, type: category === 'news' ? 'news' : 'auto', numResults: 5, contents: { text: { maxCharacters: 800 } } }),
+  if (!proxyUrl) throw new Error('请先在设置页填写 Proxy URL');
+  const params = new URLSearchParams({ query, category });
+  const res = await fetch(`${proxyUrl.replace(/\/$/, '')}/exa?${params.toString()}`, {
+    headers: { 'x-exa-key': apiKey },
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.message || 'Exa搜索失败');
+  if (!res.ok) throw new Error(data.message || data.error || 'Exa搜索失败');
   return (data.results || []).map((r) => ({ title: r.title, url: r.url, text: r.text, publishedDate: r.publishedDate }));
 }
 
