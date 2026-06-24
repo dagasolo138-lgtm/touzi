@@ -11,10 +11,11 @@ import {
   YAxis,
 } from 'recharts';
 import TransactionForm from '../components/TransactionForm.jsx';
-import { getFund, getFunds, getNavHistory, getTransactions, saveNav } from '../db/index.js';
+import { getConfig, getFund, getFunds, getNavHistory, getTransactions, saveNav } from '../db/index.js';
 import { fetchNavHistory } from '../services/fundApi.js';
 import { formatMoney, formatNav, formatPct, yuanToCents } from '../utils/formatters.js';
-import { buildPortfolio } from '../utils/positionEngine.js';
+import { buildPortfolio, categoryBreakdown } from '../utils/positionEngine.js';
+import { buildFactorSnapshot } from '../utils/factorEngine.js';
 
 const RANGE_OPTIONS = [
   ['1m', '1月', 30],
@@ -76,15 +77,18 @@ export default function FundDetail() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [config, setConfig] = useState(null);
+  const [showPriceState, setShowPriceState] = useState(false);
 
   async function load() {
     setLoading(true);
     try {
-      const [fundRow, fundRows, txRows, navRows] = await Promise.all([getFund(code), getFunds(true), getTransactions(), getNavHistory()]);
+      const [fundRow, fundRows, txRows, navRows, cfg] = await Promise.all([getFund(code), getFunds(true), getTransactions(), getNavHistory(), getConfig()]);
       setFund(fundRow || { code, name: `基金 ${code}`, category: '未分类' });
       setFunds(fundRows);
       setTransactions(txRows.filter((tx) => tx.fundCode === code));
       setNavHistory(navRows.filter((nav) => nav.fundCode === code).sort((a, b) => a.date.localeCompare(b.date)));
+      setConfig(cfg);
       setError('');
     } catch (err) {
       setError(err.message || '基金详情加载失败');
@@ -146,6 +150,15 @@ export default function FundDetail() {
         : '震荡'
     : '数据不足';
 
+
+  const priceSnapshot = useMemo(() => {
+    if (!fund || !config) return null;
+    const latestMap = navHistory.length ? { [code]: latestNavRow } : {};
+    const allPortfolio = buildPortfolio(funds, transactions, latestMap);
+    const breakdown = categoryBreakdown(allPortfolio.holdings, config.categories, config.targetAllocation);
+    return buildFactorSnapshot({ category: fund.category, signalFundCode: code, navRows: navHistory, actualWeight: breakdown[fund.category]?.weight || 0, targetWeight: breakdown[fund.category]?.targetWeight || 0, asOfDate: new Date().toISOString().slice(0, 10), settings: config.factorSettings });
+  }, [code, config, fund, funds, latestNavRow, navHistory, transactions]);
+
   async function refreshHistory() {
     setRefreshing(true);
     try {
@@ -184,6 +197,19 @@ export default function FundDetail() {
       <p className="text-yellow-100">净值历史数据不足，点击刷新净值获取更多数据</p>
       <button className="btn" disabled={refreshing} onClick={refreshHistory}>{refreshing ? '刷新中...' : '刷新净值'}</button>
     </div>}
+
+
+    <section className="card p-4">
+      <button className="flex w-full items-center justify-between text-left font-semibold text-white" onClick={() => setShowPriceState((value) => !value)}><span>价格状态</span><span className="text-[#888888]">{showPriceState ? '收起' : '展开'}</span></button>
+      {showPriceState && <div className="mt-4 grid gap-3 text-sm text-[#d4d4d4] md:grid-cols-3">
+        <p>价格状态分：{priceSnapshot?.priceCondition.score == null ? '数据不足' : priceSnapshot.priceCondition.score}</p>
+        <p>价格位置分位数：{priceSnapshot?.priceCondition.raw?.percentile == null ? '数据不足' : `${(priceSnapshot.priceCondition.raw.percentile * 100).toFixed(1)}%`}</p>
+        <p>距窗口高点回撤：{priceSnapshot?.priceCondition.raw?.drawdown == null ? '数据不足' : `${(priceSnapshot.priceCondition.raw.drawdown * 100).toFixed(1)}%`}</p>
+        <p>RSI：{priceSnapshot?.priceCondition.raw?.rsi == null ? '数据不足' : priceSnapshot.priceCondition.raw.rsi.toFixed(1)}</p>
+        <p>数据置信度：{priceSnapshot?.dataConfidence.score ?? '数据不足'}</p>
+        <p>行动说明：{priceSnapshot?.explanation || '数据不足，暂不生成行动提示'}</p>
+      </div>}
+    </section>
 
     <section className="card p-4">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
