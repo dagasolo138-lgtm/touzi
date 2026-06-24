@@ -13,7 +13,8 @@ import {
 import TransactionForm from '../components/TransactionForm.jsx';
 import { getFund, getFunds, getNavHistory, getTransactions, saveNav } from '../db/index.js';
 import { fetchNavHistory } from '../services/fundApi.js';
-import { centsToYuan, formatMoney, formatNav, formatPct, yuanToCents } from '../utils/formatters.js';
+import { formatMoney, formatNav, formatPct, yuanToCents } from '../utils/formatters.js';
+import { buildPortfolio } from '../utils/positionEngine.js';
 
 const RANGE_OPTIONS = [
   ['1m', '1月', 30],
@@ -44,26 +45,6 @@ function calcRSI(data, period = 14) {
     const rs = gains / losses;
     return 100 - 100 / (1 + rs);
   });
-}
-
-function calcPosition(transactions) {
-  let shares = 0;
-  let cost = 0;
-  let fee = 0;
-  for (const tx of [...transactions].sort((a, b) => a.date.localeCompare(b.date))) {
-    const txShares = Number(tx.shares) || 0;
-    const amount = tx.amountCents ?? yuanToCents(tx.amount);
-    fee += tx.feeCents ?? yuanToCents(tx.fee);
-    if (tx.type === 'sell') {
-      const avg = shares ? cost / shares : 0;
-      shares -= txShares;
-      cost -= avg * txShares;
-    } else {
-      shares += txShares;
-      cost += amount;
-    }
-  }
-  return { shares, cost: Math.round(cost), fee };
 }
 
 function TriangleDot({ cx, cy, fill, direction = 'up' }) {
@@ -114,12 +95,17 @@ export default function FundDetail() {
 
   useEffect(() => { load(); }, [code]);
 
-  const position = useMemo(() => calcPosition(transactions), [transactions]);
-  const latestNav = navHistory.at(-1)?.nav || 0;
-  const marketValue = Math.round(position.shares * latestNav * 100);
-  const pnl = marketValue - position.cost;
-  const pnlPct = position.cost ? pnl / position.cost : 0;
-  const avgCost = position.shares ? centsToYuan(position.cost) / position.shares : 0;
+  const latestNavRow = navHistory.at(-1);
+  const position = useMemo(() => buildPortfolio(
+    fund ? [fund] : [],
+    transactions,
+    latestNavRow ? { [code]: { nav: latestNavRow.nav, date: latestNavRow.date } } : {},
+  ).holdings[0] || { shares: 0, totalCost: 0, totalFee: 0, unrealizedPnl: 0, value: 0, avgCost: 0 }, [code, fund, latestNavRow, transactions]);
+  const latestNav = latestNavRow?.nav || 0;
+  const marketValue = position.value;
+  const pnl = position.unrealizedPnl;
+  const pnlPct = position.pnlPct;
+  const avgCost = position.avgCost;
   const hasHolding = position.shares > 0;
 
   const chartData = useMemo(() => {
