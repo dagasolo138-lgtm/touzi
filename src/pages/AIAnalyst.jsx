@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { clearAllConversations, deleteConversation, getConfig, getConversation, getConversations, getFunds, getNavHistory, getTransactions, saveAiLog, saveConversation } from '../db/index.js';
+import { clearAllConversations, deleteConversation, getConfig, getConversation, getConversations, getDcaPlans, getFunds, getNavHistory, getSnapshots, getTransactions, saveAiLog, saveAnalysisRun, saveConversation, updateAnalysisRun } from '../db/index.js';
 import { estimateCost, streamWithTools } from '../services/deepseek.js';
 import { ANALYST_SYSTEM_PROMPT, TRIAGE_PROMPT } from '../services/analystPrompt.js';
 import { runStep, runNewCapital, runFundDive, runHealthCheck } from '../services/skillPipelines.js';
 import { TOOL_DEFINITIONS, buildFactorContext, buildPortfolioContext, executeTool as runTool, exaSearch } from '../services/exaSearch.js';
 import { buildCategoryFactorSnapshots } from '../services/factorContext.js';
+import { runCollaboration } from '../services/collaborationEngine.js';
+import { buildResearchPacket } from '../services/researchContext.js';
+import { COLLABORATION_AGENT_META } from '../services/collaborationPrompts.js';
 import { fetchNavHistory } from '../services/fundApi.js';
 import { useStore } from '../store/useStore.js';
 import { makeId } from '../utils/formatters.js';
@@ -61,6 +64,9 @@ export default function AIAnalyst() {
   const [error, setError] = useState('');
   const [pipelineSteps, setPipelineSteps] = useState([]);
   const [hitl, setHitl] = useState(null);
+  const [aiMode, setAiMode] = useState(() => localStorage.getItem('investment-ai-mode') || 'single');
+  const [collabSteps, setCollabSteps] = useState([]);
+  const cancelRef = useRef({ cancelled: false, runId: null });
   const iteratorRef = useRef(null);
   const runtimeRef = useRef(null);
   const scrollerRef = useRef(null);
@@ -70,6 +76,7 @@ export default function AIAnalyst() {
   useEffect(() => { if (config?.defaultThinkingMode) setThinkingMode(config.defaultThinkingMode); }, [config?.defaultThinkingMode]);
   useEffect(() => { scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: 'smooth' }); }, [displayMessages]);
   useEffect(() => { if (!input && inputRef.current) inputRef.current.style.height = 'auto'; }, [input]);
+  useEffect(() => { localStorage.setItem('investment-ai-mode', aiMode); }, [aiMode]);
 
   const holdings = summary?.holdings || [];
   const latestContext = useMemo(() => buildPortfolioContext(holdings, config), [holdings, config]);
@@ -87,6 +94,7 @@ export default function AIAnalyst() {
     setPipelineSteps([]);
     setHitl(null);
     setError('');
+    setCollabSteps([]);
   }
 
   async function loadConversation(id) {
@@ -98,6 +106,7 @@ export default function AIAnalyst() {
     setApiMessages(conv.apiMessages || conv.messages || []);
     setLastUsage(conv.lastUsage || null);
     setError('');
+    setCollabSteps([]);
   }
 
   async function removeConversation(id, event) {
@@ -200,9 +209,99 @@ export default function AIAnalyst() {
     if (runtime) runtime.applyDisplay((msgs) => msgs.map((msg) => (msg.id === runtime.assistantId ? { ...msg, content: `${msg.content}\n\n已取消生成建议。`, status: 'done' } : msg)));
   }
 
+  function initialCollabSteps() {
+    return [
+      { agentId: 'prepare', label: '数据准备', status: 'waiting', durationMs: 0 },
+      { agentId: 'quantitativeAnalyst', label: '量化与组合分析', status: 'waiting', durationMs: 0 },
+      { agentId: 'factResearcher', label: '市场与基金事实研究', status: 'waiting', durationMs: 0 },
+      { agentId: 'riskReviewer', label: '风险审查', status: 'waiting', durationMs: 0 },
+      { agentId: 'chiefAnalyst', label: '首席整合', status: 'waiting', durationMs: 0 },
+    ];
+  }
+
+  async function sendCollaboration(q) {
+    const convId = currentConvId || makeId();
+    const userDisplay = { id: makeId(), role: 'user', content: q, reasoning: '', reasoningDone: true, toolEvents: [], status: 'done', timestamp: Date.now() };
+    const assistantId = makeId();
+    const runId = makeId();
+    const assistantDisplay = { id: assistantId, role: 'assistant', content: '', reasoning: '', reasoningDone: true, toolEvents: [], status: 'streaming', timestamp: Date.now(), analysisRunId: runId, collaboration: { agentRuns: [], totalUsage: null, estimatedCostUSD: 0 } };
+    const nextDisplay = [...displayMessages, userDisplay, assistantDisplay];
+    setCurrentConvId(convId);
+    setDisplayMessages(nextDisplay);
+    setInput('');
+    setIsStreaming(true);
+    setLastUsage(null);
+    setError('');
+    setCollabSteps(initialCollabSteps());
+    cancelRef.current = { cancelled: false, runId };
+
+    let finalDisplay = nextDisplay;
+    const applyDisplay = (producer) => {
+      if (cancelRef.current.cancelled || cancelRef.current.runId !== runId) return;
+      setDisplayMessages((msgs) => {
+        const updated = producer(msgs);
+        finalDisplay = updated;
+        return updated;
+      });
+    };
+    const updateCollabStep = (agentId, patch) => {
+      if (cancelRef.current.cancelled || cancelRef.current.runId !== runId) return;
+      setCollabSteps((steps) => steps.map((step) => (step.agentId === agentId ? { ...step, ...patch } : step)));
+    };
+    try {
+      const [freshCfg, freshFunds, freshTx, freshNavRows, dcaPlans, snapshots] = await Promise.all([getConfig(), getFunds(), getTransactions(), getNavHistory(), getDcaPlans(), getSnapshots()]);
+      const asOfDate = new Date().toISOString().slice(0, 10);
+      const researchPacket = buildResearchPacket({ config: freshCfg, funds: freshFunds, transactions: freshTx, navRows: freshNavRows, dcaPlans, snapshots, asOfDate });
+      const runRecord = { id: runId, conversationId: convId, mode: 'collaboration', question: q, asOfDate, createdAt: Date.now(), status: 'running', researchPacketMeta: { asOfDate, generatedAt: researchPacket.generatedAt, holdingCount: researchPacket.portfolio.holdings.length, staleFunds: researchPacket.dataQuality.staleFunds }, agentRuns: [], finalContent: '', totalUsage: null, estimatedCostUSD: 0, riskVerdict: null };
+      await saveAnalysisRun(runRecord);
+      updateCollabStep('prepare', { status: 'done', durationMs: 0 });
+      const agentRuns = {};
+      const prompts = freshCfg.agentSettings?.mode2 || {};
+      const onEvent = async (event) => {
+        if (cancelRef.current.cancelled || cancelRef.current.runId !== runId) return;
+        if (event.type === 'agent_start') updateCollabStep(event.agentId, { status: 'running', startedAt: event.startedAt });
+        if (event.type === 'agent_done' || event.type === 'agent_error') {
+          updateCollabStep(event.agentId, { status: event.type === 'agent_error' ? 'error' : 'done', durationMs: event.durationMs || 0 });
+          if (event.agentId !== 'prepare') {
+            agentRuns[event.agentId] = { agentId: event.agentId, label: event.label, prompt: prompts.prompts?.[event.agentId] || '', startedAt: event.startedAt, completedAt: Date.now(), durationMs: event.durationMs, status: event.type === 'agent_error' ? 'error' : 'done', report: event.report, toolEvents: event.toolEvents || [], sources: event.report?.sources || [], usage: event.usage || {}, error: event.error };
+            await updateAnalysisRun(runId, { agentRuns: Object.values(agentRuns), status: event.type === 'agent_error' ? 'partial' : 'running', riskVerdict: agentRuns.riskReviewer?.report?.verdict || null });
+            applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, collaboration: { ...(msg.collaboration || {}), agentRuns: Object.values(agentRuns), riskVerdict: agentRuns.riskReviewer?.report?.verdict } } : msg)));
+          }
+        }
+        if (event.type === 'final_chunk') applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, content: msg.content + event.content } : msg)));
+        if (event.type === 'final_done') setLastUsage(event.usage);
+      };
+      const result = await runCollaboration({ question: q, thinkingMode, researchPacket, prompts, proxyUrl: freshCfg.proxyUrl, onEvent });
+      if (cancelRef.current.cancelled || cancelRef.current.runId !== runId) return;
+      const finalAgentRuns = Object.entries(result.agentRuns || {}).map(([agentId, run]) => ({ agentId, label: COLLABORATION_AGENT_META[agentId]?.label || agentId, prompt: prompts.prompts?.[agentId] || '', ...run }));
+      await updateAnalysisRun(runId, { completedAt: Date.now(), status: result.status, agentRuns: finalAgentRuns, finalContent: result.finalContent, totalUsage: result.totalUsage, estimatedCostUSD: result.estimatedCostUSD, riskVerdict: result.riskVerdict });
+      const completedApi = [...apiMessages, { role: 'user', content: q }, { role: 'assistant', content: result.finalContent }];
+      const completedDisplay = finalDisplay.map((msg) => (msg.id === assistantId ? { ...msg, content: result.finalContent || msg.content, status: result.status === 'failed' ? 'error' : 'done', usage: result.totalUsage, collaboration: { ...(msg.collaboration || {}), agentRuns: finalAgentRuns, totalUsage: result.totalUsage, estimatedCostUSD: result.estimatedCostUSD, riskVerdict: result.riskVerdict } } : msg));
+      setApiMessages(completedApi);
+      setDisplayMessages(completedDisplay);
+      await persistConversation({ convId, display: completedDisplay, api: completedApi, usage: result.totalUsage });
+      await saveAiLog({ question: q.slice(0, 50), thinkingMode, inputTokens: result.totalUsage?.prompt_tokens || 0, outputTokens: result.totalUsage?.completion_tokens || 0, reasoningTokens: result.totalUsage?.reasoning_tokens || 0, estimatedCostUSD: parseFloat((result.estimatedCostUSD || 0).toFixed(4)), exaCallCount: Object.values(result.agentRuns || {}).flatMap((r) => r.toolEvents || []).filter((e) => e.name === 'exa_search').length });
+    } catch (e) {
+      setError(e.message);
+      await updateAnalysisRun(runId, { status: 'failed', completedAt: Date.now(), error: e.message });
+      applyDisplay((msgs) => msgs.map((msg) => (msg.id === assistantId ? { ...msg, content: msg.content || `出错：${e.message}`, status: 'error' } : msg)));
+    } finally {
+      setIsStreaming(false);
+    }
+  }
+
+  async function cancelCollaboration() {
+    if (!cancelRef.current.runId) return;
+    cancelRef.current.cancelled = true;
+    await updateAnalysisRun(cancelRef.current.runId, { status: 'cancelled', completedAt: Date.now() });
+    setIsStreaming(false);
+    setCollabSteps((steps) => steps.map((step) => (step.status === 'running' || step.status === 'waiting' ? { ...step, status: 'error' } : step)));
+  }
+
   async function send() {
     const q = input.trim();
     if (!q || isStreaming) return;
+    if (aiMode === 'collaboration') return sendCollaboration(q);
 
     const convId = currentConvId || makeId();
     const userDisplay = { id: makeId(), role: 'user', content: q, reasoning: '', reasoningDone: true, toolEvents: [], status: 'done', timestamp: Date.now() };
@@ -290,7 +389,7 @@ export default function AIAnalyst() {
 
   return <div className="flex h-[calc(100vh-7rem)] flex-col overflow-hidden rounded-lg border border-vscode-border bg-vscode-panel">
     <header className="flex items-center justify-between border-b border-vscode-border p-4">
-      <h2 className="text-xl font-bold text-white">AI 分析师</h2>
+      <div><h2 className="text-xl font-bold text-white">AI 分析师</h2><div className="mt-2 flex rounded-lg border border-vscode-border bg-[#111111] p-1 text-sm"><button className={aiMode === 'single' ? 'btn' : 'btn2'} disabled={isStreaming} onClick={() => setAiMode('single')}>单 AI</button><button className={aiMode === 'collaboration' ? 'btn' : 'btn2'} disabled={isStreaming} onClick={() => setAiMode('collaboration')}>四 AI 协同</button></div></div>
       <div className="flex flex-wrap items-center gap-2">
         {MODE_OPTIONS.map(([value, label]) => <button key={value} className={thinkingMode === value ? 'btn' : 'btn2'} disabled={isStreaming} onClick={() => setThinkingMode(value)}>{label}</button>)}
         <button className="btn2" disabled={isStreaming} onClick={startNewConversation}>新对话</button>
@@ -316,11 +415,12 @@ export default function AIAnalyst() {
               {msg.reasoning && <details className="my-2 rounded border border-vscode-border"><summary className="cursor-pointer px-3 py-1 text-sm text-gray-400">{msg.reasoningDone ? '▶ 查看思考过程' : '⏳ 思考中...'}</summary><pre className="whitespace-pre-wrap p-3 text-xs text-gray-500">{msg.reasoning}</pre></details>}
               {msg.toolEvents?.map((evt) => <div key={evt.callId} className="my-1 text-xs text-gray-400">{evt.status === 'running' ? `🔍 正在${getToolLabel(evt.name)}...` : evt.error ? `✗ ${getToolLabel(evt.name)}失败` : `✓ ${getToolLabel(evt.name)}完成`}</div>)}
               {msg.role === 'assistant' ? <div><ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>{msg.content || (msg.status === 'streaming' ? '...' : '')}</ReactMarkdown></div> : <div className="whitespace-pre-wrap">{msg.content}</div>}
-              {msg.status === 'error' && <div className="mt-2 text-xs text-red-400">生成失败</div>}
+              {msg.collaboration && <details className="mt-3 rounded border border-vscode-border p-2 text-left text-xs text-gray-400"><summary className="cursor-pointer text-gray-200">查看协同过程</summary><div className="mt-2 space-y-2"><div>风险审查 verdict：{msg.collaboration.riskVerdict || '—'}</div><div>总 token：{((msg.collaboration.totalUsage?.prompt_tokens || 0) + (msg.collaboration.totalUsage?.completion_tokens || 0) + (msg.collaboration.totalUsage?.reasoning_tokens || 0)).toLocaleString()}；估算成本：${(msg.collaboration.estimatedCostUSD || 0).toFixed(4)}</div>{(msg.collaboration.agentRuns || []).map((run) => <details key={run.agentId} className="rounded bg-[#111] p-2"><summary className="cursor-pointer">{run.label || run.agentId} · {run.status} · {run.durationMs ? `${(run.durationMs / 1000).toFixed(1)}s` : '—'} · tokens {((run.usage?.prompt_tokens || 0) + (run.usage?.completion_tokens || 0) + (run.usage?.reasoning_tokens || 0)).toLocaleString()}</summary><div className="mt-2"><div className="mb-1 text-gray-500">角色 Prompt 当前版本</div><pre className="whitespace-pre-wrap">{run.prompt || '—'}</pre><div className="mb-1 mt-2 text-gray-500">原始报告</div><pre className="whitespace-pre-wrap">{JSON.stringify(run.report || {}, null, 2)}</pre>{run.toolEvents?.length > 0 && <><div className="mb-1 mt-2 text-gray-500">工具调用和来源</div><pre className="whitespace-pre-wrap">{JSON.stringify(run.toolEvents, null, 2)}</pre></>}</div></details>)}</div></details>}{msg.status === 'error' && <div className="mt-2 text-xs text-red-400">生成失败</div>}
               {msg.usage && <div className="mt-2 text-right text-xs text-gray-500">Input {msg.usage.prompt_tokens?.toLocaleString()} | Output {msg.usage.completion_tokens?.toLocaleString()} | Reasoning {msg.usage.reasoning_tokens?.toLocaleString()} tokens | ≈${estimateCost(msg.usage).toFixed(4)}</div>}
             </div>
           </div>)}
         </div>
+        {aiMode === 'collaboration' && <div className="border-t border-vscode-border bg-[#181818] p-4"><p className="mb-3 text-sm text-[#888888]">四 AI 协同会读取组合与因子数据，并按需搜索外部事实。耗时和 API 成本高于单 AI。</p>{collabSteps.length > 0 && <div className="flex flex-wrap gap-3 text-sm">{collabSteps.map((step) => <div key={step.agentId} className="flex items-center gap-2 rounded-full border border-vscode-border px-3 py-1 text-gray-300"><span>{step.status === 'running' ? '⏳' : step.status === 'done' ? '✓' : step.status === 'error' ? '✗' : '○'}</span><span>{step.label}</span><span className="text-xs text-gray-500">{step.status}{step.durationMs ? ` ${(step.durationMs / 1000).toFixed(1)}s` : ''}</span></div>)}</div>}{isStreaming && <button className="btn2 mt-3 text-red-300" onClick={cancelCollaboration}>取消协同任务</button>}</div>}
         {(pipelineSteps.length > 0 || hitl) && <div className="border-t border-vscode-border bg-[#181818] p-4">
           {pipelineSteps.length > 0 && <div className="mb-3 flex flex-wrap gap-3 text-sm">
             {pipelineSteps.map((step) => <div key={step.name} className="flex items-center gap-2 rounded-full border border-vscode-border px-3 py-1 text-gray-300">
