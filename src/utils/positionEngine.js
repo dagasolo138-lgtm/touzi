@@ -38,13 +38,14 @@ export function buildPortfolio(funds = [], transactions = [], navMap = {}) {
 
       if (tx.type === 'sell') {
         const avgCost = shares > 0 ? totalCost / shares : 0;
-        const soldCost = avgCost * txShares;
+        const sellProceeds = amount;
+        const costBasis = avgCost * txShares;
         shares -= txShares;
-        totalCost -= soldCost;
-        realizedPnl += amount - soldCost;
+        totalCost -= costBasis;
+        realizedPnl += sellProceeds - costBasis;
       } else {
         shares += txShares;
-        totalCost += amount;
+        totalCost += amount + txFeeCents(tx);
       }
 
       if (Math.abs(shares) < 1e-8) shares = 0;
