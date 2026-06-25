@@ -14,8 +14,9 @@ import TransactionForm from '../components/TransactionForm.jsx';
 import { getConfig, getFund, getFunds, getNavHistory, getTransactions, saveNav } from '../db/index.js';
 import { fetchNavHistory } from '../services/fundApi.js';
 import { formatMoney, formatNav, formatPct, yuanToCents } from '../utils/formatters.js';
-import { buildFactorSnapshot } from '../utils/factorEngine.js';
+import { buildFactorSnapshot, calcDrawdownFromPeak, calcPricePercentile, evaluateHoldingWarning } from '../utils/factorEngine.js';
 import { buildCategoryFactorSnapshots } from '../services/factorContext.js';
+import { buildPortfolio } from '../utils/positionEngine.js';
 
 const RANGE_OPTIONS = [
   ['1m', '1月', 30],
@@ -163,6 +164,16 @@ export default function FundDetail() {
     return buildCategoryFactorSnapshots({ config, funds, transactions, navRows: allNavRows, asOfDate: new Date().toISOString().slice(0, 10) }).snapshotsByCategory[fund.category] || null;
   }, [allNavRows, config, fund, funds, transactions]);
 
+  const holdingWarning = useMemo(() => {
+    if (!hasHolding || navHistory.length < 30) return null;
+    const recentRows = navHistory.slice(-252);
+    const percentile = calcPricePercentile(recentRows, 252);
+    const drawdown = calcDrawdownFromPeak(recentRows, 252);
+    if (percentile == null || drawdown == null) return null;
+    return evaluateHoldingWarning({ pnlPct, percentile, drawdown });
+  }, [hasHolding, navHistory, pnlPct]);
+
+
   async function refreshHistory() {
     setRefreshing(true);
     try {
@@ -201,6 +212,18 @@ export default function FundDetail() {
       <p className="text-yellow-100">净值历史数据不足，点击刷新净值获取更多数据</p>
       <button className="btn" disabled={refreshing} onClick={refreshHistory}>{refreshing ? '刷新中...' : '刷新净值'}</button>
     </div>}
+
+
+    {holdingWarning && <section className={`rounded-lg border p-4 ${holdingWarning.type === 'loss_aversion' ? 'border-orange-500/50 bg-orange-500/15' : 'border-yellow-500/50 bg-yellow-500/15'}`}>
+      <div className="flex gap-3">
+        <span className="text-xl">⚠️</span>
+        <div className="space-y-2">
+          <h3 className={`font-semibold ${holdingWarning.type === 'loss_aversion' ? 'text-orange-100' : 'text-yellow-100'}`}>{holdingWarning.type === 'loss_aversion' ? '损失厌恶提醒' : '过度自信提醒'}</h3>
+          <p className="text-sm leading-6 text-[#f5f5f5]">{holdingWarning.message}</p>
+          <p className="text-xs text-[#bbbbbb]">{holdingWarning.type === 'loss_aversion' ? '行为金融研究表明，60-91%的中国基民存在损失厌恶倾向。' : '高位区间历史回撤概率较高。'}</p>
+        </div>
+      </div>
+    </section>}
 
 
     <section className="card p-4">
