@@ -195,3 +195,9 @@ A股25% / QDII30% / 债券30% / 黄金15%
 - 新增 `backfillSnapshotsWithTwr()` / `backfillSnapshotTwrMetadata()`，并在设置页增加“重算历史TWR”按钮，用于回填旧快照 TWR 元数据。
 - 新增 Playwright Chromium UI 自动化测试与 `npm run test:e2e`，覆盖首页/收益追踪 TWR 文案和设置页历史 TWR 回填入口。
 - 当前剩余主要阻碍：`npm audit` 仍提示 Vite / esbuild / Vitest 链路漏洞，修复需要破坏性升级；生产包主 chunk 仍超过 500 kB，后续需要路由级代码分割。
+
+## 本次更新：因子类别差异化权重与定投联动
+
+- 因子引擎新增 `factorSettings.categoryWeights`，A股、QDII、债券、黄金可分别配置“配置优先级 / 价格状态”权重，以及价格状态内部的分位数、回撤、RSI 权重；旧配置缺少该字段或只覆盖部分类别时必须深合并默认值。
+- 类别因子快照会返回 `appliedWeights`，供 Factors 页面和后续上下文展示实际生效权重；未知类别回退到默认配置/价格与价格内部权重，不应抛错。
+- 定投执行弹窗新增因子建议卡片，只根据当前类别 `actionPriority` 给出参考倍数和“一键按建议金额”按钮；不得自动修改计划金额，必须由用户主动点击后才填入建议金额。

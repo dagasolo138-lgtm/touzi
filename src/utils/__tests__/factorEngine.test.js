@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildFactorSnapshot, calcAllocationPriority, calcDrawdownFromPeak, calcPriceCondition, calcPricePercentile, normalizeNavHistory } from '../factorEngine.js';
+import { buildFactorSnapshot, calcAllocationPriority, calcDrawdownFromPeak, calcPriceCondition, calcPricePercentile, mergeFactorSettings, normalizeNavHistory, suggestDcaMultiplier } from '../factorEngine.js';
 
 const day = (n) => `2024-${String(Math.floor((n - 1) / 28) + 1).padStart(2, '0')}-${String(((n - 1) % 28) + 1).padStart(2, '0')}`;
 const rows = (count, fn = (i) => i + 1) => Array.from({ length: count }, (_, i) => ({ date: day(i + 1), nav: fn(i) }));
@@ -38,6 +38,44 @@ describe('factorEngine', () => {
     expect(calcAllocationPriority(0.13, 0.1)).toBe(35);
     expect(calcAllocationPriority(0.16, 0.1)).toBe(20);
     expect(calcAllocationPriority(0.22, 0.1)).toBe(5);
+  });
+
+
+
+  it('applies different category weights to the same inputs', () => {
+    const navRows = rows(260, (i) => (i < 220 ? i + 100 : 360 - i * 0.6));
+    const base = { signalFundCode: '000001', navRows, actualWeight: 0.05, targetWeight: 0.25, asOfDate: day(260) };
+    const aShare = buildFactorSnapshot({ ...base, category: 'A股' });
+    const bond = buildFactorSnapshot({ ...base, category: '债券' });
+    expect(aShare.allocationPriority).toBe(bond.allocationPriority);
+    expect(aShare.priceCondition.score).not.toBe(bond.priceCondition.score);
+    expect(aShare.actionPriority).not.toBe(bond.actionPriority);
+  });
+
+  it('falls back to default weights for unknown categories', () => {
+    const snapshot = buildFactorSnapshot({ category: '未知', signalFundCode: '000001', navRows: rows(260), actualWeight: 0, targetWeight: 0.25, asOfDate: day(260) });
+    expect(snapshot.actionPriority).not.toBeNull();
+    expect(snapshot.appliedWeights).toMatchObject({ allocation: 0.65, price: 0.35, percentile: 0.45, drawdown: 0.45, rsi: 0.10 });
+  });
+
+  it('keeps default category weights when settings only override one category', () => {
+    const merged = mergeFactorSettings({ categoryWeights: { A股: { allocation: 0.5 } } });
+    expect(merged.categoryWeights.A股).toMatchObject({ allocation: 0.5, price: 0.35, percentile: 0.45 });
+    expect(merged.categoryWeights.QDII).toMatchObject({ allocation: 0.70, price: 0.30, percentile: 0.50 });
+    expect(merged.categoryWeights.债券).toBeDefined();
+    expect(merged.categoryWeights.黄金).toBeDefined();
+  });
+
+  it('maps DCA multipliers for all action priority ranges', () => {
+    expect(suggestDcaMultiplier(80).multiplier).toBe(0.5);
+    expect(suggestDcaMultiplier(60).multiplier).toBe(0.75);
+    expect(suggestDcaMultiplier(40).multiplier).toBe(1);
+    expect(suggestDcaMultiplier(20).multiplier).toBe(1.5);
+    expect(suggestDcaMultiplier(19).multiplier).toBe(2);
+  });
+
+  it('uses planned DCA amount when action priority is null', () => {
+    expect(suggestDcaMultiplier(null)).toMatchObject({ multiplier: 1.0, label: '按计划执行' });
   });
 
   it('does not generate fake high scores when data is insufficient', () => {

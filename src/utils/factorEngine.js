@@ -7,6 +7,12 @@ export const DEFAULT_FACTOR_SETTINGS = {
   rsiPeriod: 14,
   allocationWeight: 0.65,
   priceWeight: 0.35,
+  categoryWeights: {
+    A股: { allocation: 0.65, price: 0.35, percentile: 0.45, drawdown: 0.45, rsi: 0.10 },
+    QDII: { allocation: 0.70, price: 0.30, percentile: 0.50, drawdown: 0.40, rsi: 0.10 },
+    债券: { allocation: 0.80, price: 0.20, percentile: 0.60, drawdown: 0.30, rsi: 0.10 },
+    黄金: { allocation: 0.60, price: 0.40, percentile: 0.40, drawdown: 0.50, rsi: 0.10 },
+  },
   categorySignalFunds: { A股: '', QDII: '', 债券: '', 黄金: '' },
   expectedNavLagDays: { A股: 3, QDII: 5, 债券: 3, 黄金: 5 },
   maxInternalGapDays: 14,
@@ -18,9 +24,19 @@ const toDateOnly = (value) => String(value || '').slice(0, 10);
 const validNav = (row) => Number.isFinite(Number(row?.nav)) && Number(row.nav) > 0;
 
 export function mergeFactorSettings(settings = {}) {
+  const mergedCategoryWeights = Object.fromEntries(
+    Object.entries(DEFAULT_FACTOR_SETTINGS.categoryWeights).map(([category, weights]) => [
+      category,
+      { ...weights, ...(settings.categoryWeights?.[category] || {}) },
+    ]),
+  );
+  Object.entries(settings.categoryWeights || {}).forEach(([category, weights]) => {
+    if (!mergedCategoryWeights[category]) mergedCategoryWeights[category] = { ...weights };
+  });
   return {
     ...DEFAULT_FACTOR_SETTINGS,
     ...settings,
+    categoryWeights: mergedCategoryWeights,
     categorySignalFunds: { ...DEFAULT_FACTOR_SETTINGS.categorySignalFunds, ...(settings.categorySignalFunds || {}) },
     expectedNavLagDays: { ...DEFAULT_FACTOR_SETTINGS.expectedNavLagDays, ...(settings.expectedNavLagDays || {}) },
   };
@@ -147,7 +163,7 @@ export function calcAllocationPriority(actualWeight = 0, targetWeight = 0) {
   return 5;
 }
 
-export function calcPriceCondition(navRows, settings = {}) {
+export function calcPriceCondition(navRows, settings = {}, category = null) {
   const cfg = mergeFactorSettings(settings);
   const rows = normalizeNavHistory(navRows, '9999-12-31');
   const reasons = [];
@@ -162,7 +178,8 @@ export function calcPriceCondition(navRows, settings = {}) {
   const percentileScore = (1 - percentile) * 100;
   const drawdownScore = clamp(Math.abs(drawdown) / 0.3, 0, 1) * 100;
   const rsiScore = rsi <= 25 ? 80 : rsi >= 75 ? 20 : 50;
-  const score = percentileScore * 0.45 + drawdownScore * 0.45 + rsiScore * 0.10;
+  const weights = cfg.categoryWeights[category] || { percentile: 0.45, drawdown: 0.45, rsi: 0.10 };
+  const score = percentileScore * weights.percentile + drawdownScore * weights.drawdown + rsiScore * weights.rsi;
   return { score: Math.round(score), details: { percentileScore, drawdownScore, rsiScore }, raw: { percentile, drawdown, rsi }, insufficientReasons: [] };
 }
 
@@ -171,14 +188,24 @@ export function buildFactorSnapshot({ category, signalFundCode, navRows = [], ac
   const rows = normalizeNavHistory(navRows, asOfDate);
   const allocationPriority = calcAllocationPriority(actualWeight, targetWeight);
   const dataConfidence = calcDataConfidence({ navRows, asOfDate, category, signalFundCode, settings: cfg });
-  const priceCondition = signalFundCode ? calcPriceCondition(rows, cfg) : { score: null, details: null, raw: {}, insufficientReasons: ['SIGNAL_FUND_MISSING'] };
+  const priceCondition = signalFundCode ? calcPriceCondition(rows, cfg, category) : { score: null, details: null, raw: {}, insufficientReasons: ['SIGNAL_FUND_MISSING'] };
   const trendState = calcTrendState(rows, cfg.trendFast, cfg.trendSlow);
   const volatilityState = calcVolatilityState(rows, 30);
   const flags = [...new Set([...dataConfidence.flags, ...(priceCondition.insufficientReasons || [])])];
   if (trendState.state === 'bearish' && Number(priceCondition.raw?.drawdown) <= -0.15) flags.push('FALLING_KNIFE_RISK');
   const canScore = dataConfidence.score >= 70 && priceCondition.score != null;
-  const actionPriority = canScore ? Math.round(allocationPriority * cfg.allocationWeight + priceCondition.score * cfg.priceWeight) : null;
+  const catWeights = cfg.categoryWeights[category] || { allocation: cfg.allocationWeight, price: cfg.priceWeight, percentile: 0.45, drawdown: 0.45, rsi: 0.10 };
+  const actionPriority = canScore ? Math.round(allocationPriority * catWeights.allocation + priceCondition.score * catWeights.price) : null;
   const noTactical = !canScore || flags.includes('NAV_STALE') || flags.includes('SIGNAL_FUND_MISSING') || flags.includes('FALLING_KNIFE_RISK');
   const actionText = !canScore ? '数据不足，暂不生成行动提示' : noTactical ? '暂不使用额外战术资金' : actionPriority >= 70 ? '优先补足配置' : '按计划执行';
-  return { factorVersion: cfg.version, asOfDate, category, signalFundCode, allocationPriority, priceCondition, trendState, volatilityState, dataConfidence, actionPriority, flags, explanation: actionText };
+  return { factorVersion: cfg.version, asOfDate, category, signalFundCode, allocationPriority, priceCondition, trendState, volatilityState, dataConfidence, actionPriority, appliedWeights: catWeights, flags, explanation: actionText };
+}
+
+export function suggestDcaMultiplier(actionPriority) {
+  if (actionPriority == null) return { multiplier: 1.0, label: '按计划执行', reason: '数据不足，按计划100%执行' };
+  if (actionPriority >= 80) return { multiplier: 0.50, label: '减半投入', reason: '配置已饱和或价格偏高，建议减半' };
+  if (actionPriority >= 60) return { multiplier: 0.75, label: '减量投入', reason: '当前条件偏向谨慎' };
+  if (actionPriority >= 40) return { multiplier: 1.00, label: '按计划执行', reason: '条件中性，正常执行' };
+  if (actionPriority >= 20) return { multiplier: 1.50, label: '增量投入', reason: '配置偏离或价格偏低，建议加量' };
+  return { multiplier: 2.00, label: '加倍投入', reason: '配置严重偏离或价格极低，建议加倍' };
 }
