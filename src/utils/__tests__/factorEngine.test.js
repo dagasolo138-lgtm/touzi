@@ -5,12 +5,12 @@ const day = (n) => `2024-${String(Math.floor((n - 1) / 28) + 1).padStart(2, '0')
 const rows = (count, fn = (i) => i + 1) => Array.from({ length: count }, (_, i) => ({ date: day(i + 1), nav: fn(i) }));
 
 describe('evaluateHoldingWarning', () => {
-  it('warns about loss aversion when losing at a high percentile', () => {
-    expect(evaluateHoldingWarning({ pnlPct: -0.2, percentile: 0.7, drawdown: -0.05 })).toMatchObject({ type: 'loss_aversion', severity: 'warning' });
+  it('returns observation when losing at a high percentile', () => {
+    expect(evaluateHoldingWarning({ pnlPct: -0.2, percentile: 0.7, drawdown: -0.05 })).toMatchObject({ type: 'loss_high_percentile', severity: 'observation' });
   });
 
-  it('warns about overconfidence when gains are large at a high percentile', () => {
-    expect(evaluateHoldingWarning({ pnlPct: 0.35, percentile: 0.85, drawdown: 0 })).toMatchObject({ type: 'overconfidence', severity: 'caution' });
+  it('returns observation when gains are large at a high percentile', () => {
+    expect(evaluateHoldingWarning({ pnlPct: 0.35, percentile: 0.85, drawdown: 0 })).toMatchObject({ type: 'gain_high_percentile', severity: 'observation' });
   });
 
   it('returns null when pnl is invalid or thresholds are not met', () => {
@@ -82,11 +82,11 @@ describe('factorEngine', () => {
   });
 
   it('maps DCA multipliers for all action priority ranges', () => {
-    expect(suggestDcaMultiplier(80).multiplier).toBe(0.5);
-    expect(suggestDcaMultiplier(60).multiplier).toBe(0.75);
+    expect(suggestDcaMultiplier(80).multiplier).toBe(1.5);
+    expect(suggestDcaMultiplier(60).multiplier).toBe(1.2);
     expect(suggestDcaMultiplier(40).multiplier).toBe(1);
-    expect(suggestDcaMultiplier(20).multiplier).toBe(1.5);
-    expect(suggestDcaMultiplier(19).multiplier).toBe(2);
+    expect(suggestDcaMultiplier(20).multiplier).toBe(0.8);
+    expect(suggestDcaMultiplier(19).multiplier).toBe(0.5);
   });
 
   it('uses planned DCA amount when action priority is null', () => {
@@ -110,7 +110,7 @@ describe('factorEngine', () => {
     const snapshot = buildFactorSnapshot({ category: 'A股', signalFundCode: '000001', navRows: rows(260, (i) => 300 - i), actualWeight: 0, targetWeight: 0.25, asOfDate: day(260) });
     expect(snapshot.trendState.state).toBe('bearish');
     expect(snapshot.flags).toContain('FALLING_KNIFE_RISK');
-    expect(snapshot.explanation).toBe('暂不使用额外战术资金');
+    expect(snapshot.explanation).toBe('优先补足配置');
   });
 
   it('does not output category price state when signal fund is missing', () => {

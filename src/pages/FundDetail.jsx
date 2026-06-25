@@ -214,13 +214,13 @@ export default function FundDetail() {
     </div>}
 
 
-    {holdingWarning && <section className={`rounded-lg border p-4 ${holdingWarning.type === 'loss_aversion' ? 'border-orange-500/50 bg-orange-500/15' : 'border-yellow-500/50 bg-yellow-500/15'}`}>
+    {holdingWarning && <section className={`rounded-lg border p-4 ${holdingWarning.type === 'loss_high_percentile' ? 'border-orange-500/50 bg-orange-500/15' : 'border-yellow-500/50 bg-yellow-500/15'}`}>
       <div className="flex gap-3">
         <span className="text-xl">⚠️</span>
         <div className="space-y-2">
-          <h3 className={`font-semibold ${holdingWarning.type === 'loss_aversion' ? 'text-orange-100' : 'text-yellow-100'}`}>{holdingWarning.type === 'loss_aversion' ? '损失厌恶提醒' : '过度自信提醒'}</h3>
+          <h3 className={`font-semibold ${holdingWarning.type === 'loss_high_percentile' ? 'text-orange-100' : 'text-yellow-100'}`}>持仓观察</h3>
           <p className="text-sm leading-6 text-[#f5f5f5]">{holdingWarning.message}</p>
-          <p className="text-xs text-[#bbbbbb]">{holdingWarning.type === 'loss_aversion' ? '行为金融研究表明，60-91%的中国基民存在损失厌恶倾向。' : '高位区间历史回撤概率较高。'}</p>
+          <p className="text-xs text-[#bbbbbb]">请结合配置目标、组合整体情况与数据时滞综合判断。</p>
         </div>
       </div>
     </section>}

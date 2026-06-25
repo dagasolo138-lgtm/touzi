@@ -197,36 +197,35 @@ export function buildFactorSnapshot({ category, signalFundCode, navRows = [], ac
   const catWeights = cfg.categoryWeights[category] || { allocation: cfg.allocationWeight, price: cfg.priceWeight, percentile: 0.45, drawdown: 0.45, rsi: 0.10 };
   const actionPriority = canScore ? Math.round(allocationPriority * catWeights.allocation + priceCondition.score * catWeights.price) : null;
   const noTactical = !canScore || flags.includes('NAV_STALE') || flags.includes('SIGNAL_FUND_MISSING') || flags.includes('FALLING_KNIFE_RISK');
-  const actionText = !canScore ? '数据不足，暂不生成行动提示' : noTactical ? '暂不使用额外战术资金' : actionPriority >= 70 ? '优先补足配置' : '按计划执行';
+  const actionText = !canScore ? '数据不足，暂不生成行动提示' : actionPriority >= 70 ? '优先补足配置' : actionPriority >= 40 ? '按计划执行' : '该类别暂不优先';
   return { factorVersion: cfg.version, asOfDate, category, signalFundCode, allocationPriority, priceCondition, trendState, volatilityState, dataConfidence, actionPriority, appliedWeights: catWeights, flags, explanation: actionText };
 }
 
 export function suggestDcaMultiplier(actionPriority) {
   if (actionPriority == null) return { multiplier: 1.0, label: '按计划执行', reason: '数据不足，按计划100%执行' };
-  if (actionPriority >= 80) return { multiplier: 0.50, label: '减半投入', reason: '配置已饱和或价格偏高，建议减半' };
-  if (actionPriority >= 60) return { multiplier: 0.75, label: '减量投入', reason: '当前条件偏向谨慎' };
+  if (actionPriority >= 80) return { multiplier: 1.50, label: '增量投入', reason: '该类别优先级高（配置欠配或价格偏低），建议加量' };
+  if (actionPriority >= 60) return { multiplier: 1.20, label: '小幅加量', reason: '该类别条件偏向积极' };
   if (actionPriority >= 40) return { multiplier: 1.00, label: '按计划执行', reason: '条件中性，正常执行' };
-  if (actionPriority >= 20) return { multiplier: 1.50, label: '增量投入', reason: '配置偏离或价格偏低，建议加量' };
-  return { multiplier: 2.00, label: '加倍投入', reason: '配置严重偏离或价格极低，建议加倍' };
+  if (actionPriority >= 20) return { multiplier: 0.80, label: '小幅减量', reason: '该类别条件偏向谨慎' };
+  return { multiplier: 0.50, label: '减半投入', reason: '配置已饱和或价格偏高，建议减半' };
 }
-
 
 export function evaluateHoldingWarning({ pnlPct, percentile, drawdown } = {}) {
   if (!Number.isFinite(pnlPct)) return null;
 
   if (pnlPct < -0.15 && percentile != null && percentile > 0.6) {
     return {
-      type: 'loss_aversion',
-      severity: 'warning',
-      message: `当前已亏损 ${(pnlPct * 100).toFixed(1)}%，但价格仍处近一年 ${(percentile * 100).toFixed(0)}% 分位。损失厌恶可能让你继续持有，但下跌空间未必释放完毕。理性评估：是否仍符合配置目标？是否需要止损或追加？`,
+      type: 'loss_high_percentile',
+      severity: 'observation',
+      message: `当前已亏损 ${(pnlPct * 100).toFixed(1)}%，价格仍处近一年 ${(percentile * 100).toFixed(0)}% 分位。这是一个观察提示，不代表买卖建议——请结合该基金是否仍符合你的配置目标、近期是否有数据滞后或趋势风险来判断。`,
     };
   }
 
   if (pnlPct > 0.30 && percentile != null && percentile > 0.8) {
     return {
-      type: 'overconfidence',
-      severity: 'caution',
-      message: `当前已盈利 ${(pnlPct * 100).toFixed(1)}%，价格处近一年 ${(percentile * 100).toFixed(0)}% 分位的高位区间。注意过度自信偏差：考虑部分止盈再平衡，避免高位回撤吃掉收益。`,
+      type: 'gain_high_percentile',
+      severity: 'observation',
+      message: `当前已盈利 ${(pnlPct * 100).toFixed(1)}%，价格处近一年 ${(percentile * 100).toFixed(0)}% 分位的高位区间。这是一个观察提示，不代表买卖建议——请结合配置偏离、组合整体情况来判断是否需要再平衡。`,
     };
   }
 

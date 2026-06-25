@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { getNavHistory, getSnapshots, getTransactions, saveNav } from '../db/index.js';
 import { fetchNavHistory } from '../services/fundApi.js';
+import { alignAndNormalizeSeries } from '../utils/benchmarkEngine.js';
 import { calculateTwrSeries } from '../utils/twrEngine.js';
 
 const BENCHMARKS = [
@@ -24,18 +25,15 @@ const fmtReturn = (v) => (Number.isFinite(v) ? `${v >= 0 ? '+' : ''}${v.toFixed(
 const valueClass = (v) => (!Number.isFinite(v) ? 'text-[#888888]' : v >= 0 ? 'good' : 'danger');
 const toDate = (date) => new Date(`${date}T00:00:00`);
 
-function normalizeSeries(rows, valueKey) {
-  const cleaned = rows
+function rawSeries(rows, valueKey) {
+  return rows
     .map((row) => ({ date: row.date, value: Number(row[valueKey]) }))
     .filter((row) => row.date && Number.isFinite(row.value) && row.value > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
-  const start = cleaned[0]?.value;
-  if (!start) return [];
-  return cleaned.map((row) => ({ date: row.date, value: (row.value / start) * 100 }));
 }
 
-function normalizeTwrSeries(series = []) {
-  return normalizeSeries(series.filter((row) => row.status === 'ok').map((row) => ({ date: row.endDate, value: (1 + row.cumulativeReturn) * 100 })), 'value');
+function rawTwrSeries(series = []) {
+  return rawSeries(series.filter((row) => row.status === 'ok').map((row) => ({ date: row.endDate, value: (1 + row.cumulativeReturn) * 100 })), 'value');
 }
 
 function CustomTooltip({ active, payload, label }) {
@@ -113,17 +111,22 @@ export default function Benchmark() {
     return () => { alive = false; };
   }, []);
 
-  const { chartData, stats } = useMemo(() => {
-    if (snapshots.length < 2) return { chartData: [], stats: {} };
+  const { chartData, stats, commonStartDate } = useMemo(() => {
+    if (snapshots.length < 2) return { chartData: [], stats: {}, commonStartDate: null };
     const selected = RANGES.find((item) => item.id === range) || RANGES[3];
     const maxDate = snapshots.at(-1)?.date;
     const cutoff = selected.days && maxDate ? new Date(toDate(maxDate).getTime() - selected.days * 86400000).toISOString().slice(0, 10) : null;
     const twr = calculateTwrSeries({ snapshots, transactions });
-    const portfolioSeries = normalizeTwrSeries((twr.series || []).filter((row) => !cutoff || row.endDate >= cutoff));
-    const seriesMap = { portfolio: portfolioSeries };
-    BENCHMARKS.forEach((benchmark) => {
-      seriesMap[benchmark.id] = normalizeSeries((benchmarkRows[benchmark.id] || []).filter((row) => !cutoff || row.date >= cutoff), 'nav');
-    });
+    const activeBenchmarks = BENCHMARKS.filter((benchmark) => enabled[benchmark.id] && !failed[benchmark.id]);
+    const portfolioSeries = rawTwrSeries((twr.series || []).filter((row) => !cutoff || row.endDate >= cutoff));
+    const activeBenchmarkSeries = activeBenchmarks.map((benchmark) => rawSeries((benchmarkRows[benchmark.id] || []).filter((row) => !cutoff || row.date >= cutoff), 'nav'));
+    const rawSeriesMap = { portfolio: portfolioSeries };
+    activeBenchmarks.forEach((benchmark, index) => { rawSeriesMap[benchmark.id] = activeBenchmarkSeries[index]; });
+    const aligned = alignAndNormalizeSeries(rawSeriesMap);
+    const { commonStartDate } = aligned;
+    if (!commonStartDate) return { chartData: [], stats: {}, commonStartDate: null };
+
+    const seriesMap = Object.fromEntries(Object.entries(aligned.seriesMap).map(([key, rows]) => [key, rows.map((row) => ({ date: row.date, value: row.normalized }))]));
     const dates = [...new Set(Object.values(seriesMap).flatMap((rows) => rows.map((row) => row.date)))].sort();
     const cursors = Object.fromEntries(Object.keys(seriesMap).map((key) => [key, { index: 0, value: null }]));
     const data = dates.map((date) => {
@@ -140,11 +143,11 @@ export default function Benchmark() {
     }).filter((row) => Number.isFinite(row.portfolio));
     const last = data.at(-1) || {};
     const nextStats = { portfolio: Number.isFinite(last.portfolio) ? last.portfolio - 100 : null };
-    BENCHMARKS.forEach((benchmark) => {
+    activeBenchmarks.forEach((benchmark) => {
       nextStats[benchmark.id] = Number.isFinite(last[benchmark.id]) ? last[benchmark.id] - 100 : null;
     });
-    return { chartData: data, stats: nextStats };
-  }, [benchmarkRows, range, snapshots, transactions]);
+    return { chartData: data, stats: nextStats, commonStartDate };
+  }, [benchmarkRows, enabled, failed, range, snapshots, transactions]);
 
   if (loading) return <div className="space-y-6"><h2 className="text-2xl font-bold text-white">基准对比</h2><div className="card flex min-h-[360px] items-center justify-center p-8"><div className="h-10 w-10 animate-spin rounded-full border-2 border-[#333333] border-t-[#3b82f6]" aria-label="加载中" /></div></div>;
 
@@ -152,11 +155,12 @@ export default function Benchmark() {
 
   return <div className="space-y-6">
     <header className="flex flex-wrap items-end justify-between gap-4">
-      <div><h2 className="text-2xl font-bold text-white">基准对比</h2><p className="mt-2 text-sm text-[#888888]">基准数据使用基金净值代替指数，存在跟踪误差；我的组合曲线使用 TWR 口径，已剔除买入/卖出现金流影响。</p></div>
+      <div><h2 className="text-2xl font-bold text-white">基准对比</h2><p className="mt-2 text-sm text-[#888888]">基准数据使用基金净值代替指数，存在跟踪误差；我的组合曲线使用 TWR 口径，已剔除买入/卖出现金流影响。{commonStartDate ? `所有曲线从共同起始日 ${commonStartDate} 归一化为 100，避免不同起点造成的对比失真。` : ''}</p></div>
       <div className="flex rounded-lg border border-[#333333] bg-[#111111] p-1">{RANGES.map((item) => <button key={item.id} className={`rounded-md px-3 py-1.5 text-sm ${range === item.id ? 'bg-[#3b82f6] text-white' : 'text-[#888888] hover:text-white'}`} onClick={() => setRange(item.id)}>{item.label}</button>)}</div>
     </header>
     {error && <div className="card border-red-500/40 bg-red-500/10 p-4 text-sm text-red-200">{error}</div>}
-    <section className="card p-4">
+    {!commonStartDate && <div className="card p-8 text-center text-yellow-100">所选基准与组合无共同时间区间数据，请选择其他基准或等待数据积累</div>}
+    {commonStartDate && <section className="card p-4">
       <div className="mb-4 flex flex-wrap gap-2">{BENCHMARKS.map((benchmark) => {
         const isFailed = Boolean(failed[benchmark.id]);
         return <button key={benchmark.id} title={isFailed ? '数据获取失败' : benchmark.desc} disabled={isFailed} onClick={() => setEnabled((prev) => ({ ...prev, [benchmark.id]: !prev[benchmark.id] }))} className={`rounded-full border px-3 py-1.5 text-sm transition ${isFailed ? 'cursor-not-allowed border-[#333333] bg-[#1a1a1a] text-[#555555]' : enabled[benchmark.id] ? 'text-white' : 'border-[#333333] text-[#888888]'}`} style={!isFailed && enabled[benchmark.id] ? { borderColor: benchmark.color, background: `${benchmark.color}22` } : undefined}>{benchmark.name}</button>;
@@ -172,10 +176,10 @@ export default function Benchmark() {
           {BENCHMARKS.map((benchmark) => enabled[benchmark.id] && !failed[benchmark.id] ? <Line key={benchmark.id} name={benchmark.name} dataKey={benchmark.id} stroke={benchmark.color} strokeWidth={1.5} strokeDasharray="6 4" dot={false} hide={hidden[benchmark.id]} connectNulls /> : null)}
         </LineChart>
       </ResponsiveContainer>
-    </section>
-    <section className="card overflow-x-auto p-4">
+    </section>}
+    {commonStartDate && <section className="card overflow-x-auto p-4">
       <h3 className="mb-3 font-semibold text-white">区间统计</h3>
       <table className="min-w-full text-sm"><thead><tr className="table-head"><th className="px-3 py-2 text-left"></th><th className="px-3 py-2 text-right">我的组合TWR</th>{BENCHMARKS.filter((b) => enabled[b.id] && !failed[b.id]).map((b) => <th key={b.id} className="px-3 py-2 text-right">{b.name}</th>)}</tr></thead><tbody><tr className="zebra-row"><td className="px-3 py-2 text-[#888888]">区间收益</td><td className={`px-3 py-2 text-right font-semibold ${valueClass(stats.portfolio)}`}>{fmtReturn(stats.portfolio)}</td>{BENCHMARKS.filter((b) => enabled[b.id] && !failed[b.id]).map((b) => <td key={b.id} className={`px-3 py-2 text-right font-semibold ${valueClass(stats[b.id])}`}>{fmtReturn(stats[b.id])}</td>)}</tr><tr className="zebra-row"><td className="px-3 py-2 text-[#888888]">超额收益</td><td className="px-3 py-2 text-right text-[#888888]">—</td>{BENCHMARKS.filter((b) => enabled[b.id] && !failed[b.id]).map((b) => { const excess = Number.isFinite(stats.portfolio) && Number.isFinite(stats[b.id]) ? stats.portfolio - stats[b.id] : null; return <td key={b.id} className={`px-3 py-2 text-right font-semibold ${valueClass(excess)}`}>{fmtReturn(excess)}</td>; })}</tr></tbody></table>
-    </section>
+    </section>}
   </div>;
 }

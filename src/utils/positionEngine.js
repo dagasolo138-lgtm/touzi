@@ -98,6 +98,8 @@ export function buildPortfolio(funds = [], transactions = [], navMap = {}) {
     totalRealizedPnl,
     totalPnl,
     pnlPct: totalCost ? totalPnl / totalCost : 0,
+    todayPnl: 0,
+    todayPnlPct: 0,
   };
 }
 
