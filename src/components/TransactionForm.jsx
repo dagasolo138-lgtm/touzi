@@ -76,10 +76,13 @@ export default function TransactionForm({ funds = [], editing, onSaved, onBefore
         if (toAmount(form.shares) <= 0) throw new Error('确认份额必须大于0');
       }
 
+      const selectedFund = funds.find((fund) => fund.code === form.fundCode);
       const transaction = {
         id: editing?.id || makeId(),
         date: form.date,
         fundCode: form.fundCode,
+        fundName: selectedFund?.name || editing?.fundName || '',
+        category: selectedFund?.category || editing?.category || '',
         type: form.type,
         shares: Number(form.shares),
         price: Number(form.price),

@@ -11,15 +11,15 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { getSnapshots } from '../db/index.js';
+import { getFunds, getSnapshots, getTransactions } from '../db/index.js';
 import {
   calcAnnualizedVolatility,
   calcCorrelationMatrix,
-  calcDailyReturns,
   calcMaxDrawdown,
   calcRollingVolatility,
   calcSharpe,
 } from '../utils/riskEngine.js';
+import { calculateCategoryTwrSeries, calculateTwrSeries } from '../utils/twrEngine.js';
 
 const CATEGORIES = ['A股', 'QDII', '债券', '黄金'];
 const RISK_FREE_ANNUAL = 0.02;
@@ -43,13 +43,13 @@ function sharpeLevel(sharpe) {
   return { label: '优秀', className: 'bg-blue-500/20 text-blue-200' };
 }
 
-function findDrawdownPeriod(snapshots, drawdownSeries) {
+function findDrawdownPeriod(rows, drawdownSeries) {
   let peakIndex = 0;
   let runningPeakIndex = 0;
   let troughIndex = 0;
   let maxDrawdown = 0;
-  snapshots.forEach((snapshot, index) => {
-    if (snapshot.totalValue > snapshots[runningPeakIndex].totalValue) runningPeakIndex = index;
+  rows.forEach((row, index) => {
+    if (row.value > rows[runningPeakIndex].value) runningPeakIndex = index;
     if ((drawdownSeries[index] ?? 0) < maxDrawdown) {
       maxDrawdown = drawdownSeries[index];
       peakIndex = runningPeakIndex;
@@ -57,7 +57,7 @@ function findDrawdownPeriod(snapshots, drawdownSeries) {
     }
   });
   if (maxDrawdown === 0) return '暂无明显回撤';
-  return `${snapshots[peakIndex]?.date || '—'} → ${snapshots[troughIndex]?.date || '—'}`;
+  return `${rows[peakIndex]?.date || '—'} → ${rows[troughIndex]?.date || '—'}`;
 }
 
 function hexToRgb(hex) {
@@ -101,14 +101,20 @@ function ChartTooltip({ active, payload, label, name }) {
 
 export default function Risk() {
   const [snapshots, setSnapshots] = useState([]);
+  const [transactions, setTransactions] = useState([]);
+  const [funds, setFunds] = useState([]);
   const [showNotes, setShowNotes] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let alive = true;
-    getSnapshots()
-      .then((rows) => {
-        if (alive) setSnapshots(rows.filter((row) => row.date && Number(row.totalValue) > 0).sort((a, b) => a.date.localeCompare(b.date)));
+    Promise.all([getSnapshots(), getTransactions(), getFunds(true)])
+      .then(([snapshotRows, transactionRows, fundRows]) => {
+        if (alive) {
+          setSnapshots(snapshotRows.filter((row) => row.date && Number(row.totalValue) > 0).sort((a, b) => a.date.localeCompare(b.date)));
+          setTransactions(transactionRows);
+          setFunds(fundRows);
+        }
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -117,17 +123,20 @@ export default function Risk() {
   }, []);
 
   const data = useMemo(() => {
-    const values = snapshots.map((row) => Number(row.totalValue));
-    const dailyReturns = calcDailyReturns(values);
+    const twr = calculateTwrSeries({ snapshots, transactions });
+    const twrRows = (twr.series || []).filter((row) => row.status === 'ok').map((row) => ({ date: row.endDate, value: (1 + row.cumulativeReturn) * 100, periodReturn: row.periodReturn }));
+    const values = twrRows.map((row) => row.value);
+    const dailyReturns = twrRows.map((row) => row.periodReturn);
     const volatility = calcAnnualizedVolatility(dailyReturns);
     const sharpe = calcSharpe(dailyReturns, RISK_FREE_ANNUAL);
     const { maxDrawdown, drawdownSeries } = calcMaxDrawdown(values);
-    const drawdownData = snapshots.map((row, index) => ({ date: row.date, drawdown: drawdownSeries[index] ?? 0 }));
+    const drawdownData = twrRows.map((row, index) => ({ date: row.date, drawdown: drawdownSeries[index] ?? 0 }));
     const rollingVolatility = calcRollingVolatility(dailyReturns, 30);
-    const rollingData = rollingVolatility.map((value, index) => ({ date: snapshots[index + 1]?.date, volatility: value })).filter((row) => row.date && row.volatility != null);
+    const rollingData = rollingVolatility.map((value, index) => ({ date: twrRows[index]?.date, volatility: value })).filter((row) => row.date && row.volatility != null);
+    const categoryTwr = calculateCategoryTwrSeries({ categories: CATEGORIES, funds, snapshots, transactions });
     const seriesMap = Object.fromEntries(CATEGORIES.map((category) => [
       category,
-      snapshots.map((row) => Number(row.categoryBreakdown?.[category]?.value || 0)).filter((value) => value > 0),
+      (categoryTwr[category]?.series || []).filter((row) => row.status === 'ok').map((row) => (1 + row.cumulativeReturn) * 100),
     ]));
     const noData = Object.fromEntries(CATEGORIES.map((category) => [category, seriesMap[category].length < 2]));
     const correlation = calcCorrelationMatrix(seriesMap);
@@ -139,27 +148,27 @@ export default function Risk() {
       sharpeLevel: sharpeLevel(sharpe),
       maxDrawdown,
       drawdownData,
-      drawdownPeriod: findDrawdownPeriod(snapshots, drawdownSeries),
+      drawdownPeriod: findDrawdownPeriod(twrRows, drawdownSeries),
       rollingData,
       correlation,
       noData,
       minDrawdown: Math.min(0, ...drawdownSeries),
     };
-  }, [snapshots]);
+  }, [funds, snapshots, transactions]);
 
   if (loading) return <div className="space-y-6"><h2 className="text-2xl font-bold text-white">风险分析</h2><div className="card flex min-h-[280px] items-center justify-center p-8"><div className="h-10 w-10 animate-spin rounded-full border-2 border-[#333333] border-t-[#3b82f6]" aria-label="加载中" /></div></div>;
 
-  if (snapshots.length < 10) return <div className="space-y-6">
-    <div><h2 className="text-2xl font-bold text-white">风险分析</h2><p className="mt-2 text-sm text-[#888888]">基于 {snapshots.length} 天历史数据 · 无风险利率 2%（参考短期国债）</p></div>
+  if (snapshots.length < 11) return <div className="space-y-6">
+    <div><h2 className="text-2xl font-bold text-white">风险分析</h2><p className="mt-2 text-sm text-[#888888]">基于 {Math.max(0, snapshots.length - 1)} 个 TWR 收益率观测 · 无风险利率 2%（参考短期国债）</p></div>
     <div className="card p-8 text-center">
-      <p className="text-[#d4d4d4]">风险指标需要至少10天的历史数据。每次刷新净值会自动生成快照，请持续使用后再查看。</p>
-      <p className="mt-4 text-sm text-[#888888]">当前已有 {snapshots.length} / 10 天数据</p>
-      <div className="mx-auto mt-3 h-2 max-w-md overflow-hidden rounded-full bg-[#222222]"><div className="h-full rounded-full bg-[#3b82f6]" style={{ width: `${Math.min(100, snapshots.length * 10)}%` }} /></div>
+      <p className="text-[#d4d4d4]">TWR 风险指标需要至少11个快照以形成10个收益率观测。每次刷新净值会自动生成快照，请持续使用后再查看。</p>
+      <p className="mt-4 text-sm text-[#888888]">当前已有 {snapshots.length} / 11 个快照</p>
+      <div className="mx-auto mt-3 h-2 max-w-md overflow-hidden rounded-full bg-[#222222]"><div className="h-full rounded-full bg-[#3b82f6]" style={{ width: `${Math.min(100, snapshots.length / 11 * 100)}%` }} /></div>
     </div>
   </div>;
 
   return <div className="space-y-6">
-    <div><h2 className="text-2xl font-bold text-white">风险分析</h2><p className="mt-2 text-sm text-[#888888]">基于 {snapshots.length} 天历史数据 · 无风险利率 2%（参考短期国债）</p></div>
+    <div><h2 className="text-2xl font-bold text-white">风险分析</h2><p className="mt-2 text-sm text-[#888888]">基于 {Math.max(0, snapshots.length - 1)} 个 TWR 收益率观测 · 无风险利率 2%（参考短期国债）</p></div>
 
     <section className="grid gap-4 lg:grid-cols-3">
       <MetricCard title="最大回撤" value={fmtPct(data.maxDrawdown)} valueClassName="text-red-300" description="历史最大单次下跌幅度" footer={<span>回撤区间：{data.drawdownPeriod}</span>} />
@@ -196,7 +205,7 @@ export default function Risk() {
 
     <section className="card p-4">
       <h3 className="font-semibold text-white">类别相关性</h3>
-      <p className="mt-2 text-sm text-[#888888]">相关系数越接近-1，分散化效果越好；接近+1说明同涨同跌</p>
+      <p className="mt-2 text-sm text-[#888888]">相关系数基于各类别 TWR 单期收益率；越接近-1，分散化效果越好；接近+1说明同涨同跌</p>
       <div className="mt-4 overflow-x-auto">
         <div className="grid min-w-[560px] gap-2" style={{ gridTemplateColumns: `110px repeat(${CATEGORIES.length}, minmax(88px, 1fr))` }}>
           <div />
@@ -220,11 +229,11 @@ export default function Risk() {
         <span>计算说明</span><span className="text-[#888888]">{showNotes ? '收起' : '展开'}</span>
       </button>
       {showNotes && <ul className="mt-4 list-disc space-y-2 pl-5 text-sm text-[#d4d4d4]">
-        <li>年化波动率：日收益率标准差 × √252</li>
+        <li>年化波动率：TWR 单期收益率标准差 × √252</li>
         <li>最大回撤：观测期内从峰值到谷值的最大跌幅</li>
-        <li>夏普比率：（年化收益率 - 2%）÷ 年化波动率</li>
-        <li>相关系数：Pearson相关系数，基于各类别日收益率序列</li>
-        <li>注意：组合市值包含新增投入，计算结果仅供参考</li>
+        <li>夏普比率：基于 TWR 单期收益率计算的超额收益/波动率</li>
+        <li>相关系数：Pearson相关系数，基于各类别 TWR 单期收益率序列</li>
+        <li>注意：类别 TWR 依赖基金类别映射与快照里的类别市值；历史基金改类会影响旧交易归类</li>
       </ul>}
     </section>
   </div>;

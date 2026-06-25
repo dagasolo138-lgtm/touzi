@@ -12,7 +12,7 @@ vi.mock('../deepseek.js', () => ({
 
 import { runCollaboration } from '../collaborationEngine.js';
 
-const packet = { asOfDate: '2024-01-01', generatedAt: 'x', dataQuality: {}, portfolio: { holdings: [] }, categoryBreakdown: {}, factorSnapshots: [], performanceLimitation: { performanceMethod: 'non_twr' }, knownLimitations: [] };
+const packet = { asOfDate: '2024-01-01', generatedAt: 'x', dataQuality: {}, portfolio: { holdings: [] }, categoryBreakdown: {}, factorSnapshots: [], performance: { performanceMethod: 'insufficient_for_twr' }, performanceLimitation: { performanceMethod: 'insufficient_for_twr' }, knownLimitations: [] };
 
 describe('runCollaboration scheduling', () => {
   it('starts quantitative and fact before risk, and chief after risk', async () => {

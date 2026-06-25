@@ -92,7 +92,7 @@ A股25% / QDII30% / 债券30% / 黄金15%
 
 ## 待实现功能（优先级排序）
 
-1. 时间加权收益率（TWR）计算
+1. 依赖安全升级（Vite / esbuild / Vitest）与包体拆分
 
 ## 本次更新：移动端首页与导航
 
@@ -108,7 +108,7 @@ A股25% / QDII30% / 债券30% / 黄金15%
 - “价格位置分位数”仅来自基金净值历史位置，不是估值分位数，界面和文档不得混用名称。
 - AI 分析师可读取 factor snapshot / factorSettings，但必须作为“量化辅助数据”单独理解，因子评分不能代替事实核验和投资建议。
 - 当前历史净值 Worker 请求上限已扩展，以支持 252 个有效交易日的观察需求；若上游数据不足，页面保持“数据不足”。
-- 后续最高优先级仍是时间加权收益率（TWR）计算。
+- 后续最高优先级调整为依赖安全升级与包体拆分。
 
 ## 更新记录 2026-06-24
 
@@ -125,7 +125,7 @@ A股25% / QDII30% / 债券30% / 黄金15%
 - AI 分析师新请求前会读取最新 config、funds、transactions、navHistory 并注入真实类别因子快照；量化辅助数据被明确标记为非预测结论、不可替代事实核验、不可触发自动交易，数据不足原因会原样暴露给 AI。
 - `calcDataConfidence()` 改为基于原始净值行检测无效净值、重复日期和超过 `maxInternalGapDays` 的历史断档；默认阈值 14 天，正常周末间隔不触发 DATA_GAP，NAV_STALE 仍独立使用类别最新净值滞后阈值。
 - `positionEngine` 卖出已实现收益纳入卖出手续费：已实现收益 = 卖出总金额 - 卖出手续费 - 对应成本；买入手续费仍进入成本且独立累计展示。
-- 后续最高优先级仍是时间加权收益率（TWR）计算。
+- 后续最高优先级调整为依赖安全升级与包体拆分。
 
 ## 更新记录 2026-06-24（因子数据链路修复）
 
@@ -148,9 +148,50 @@ A股25% / QDII30% / 债券30% / 黄金15%
 - 设置页新增“AI 协同模式提示词”区域，用户只能编辑四个 Agent 的角色职责 Prompt；固定运行协议在运行时追加，用于来源、数据质量、风险边界、QDII 时滞、结构化输出和禁止交易等约束，不能由用户删除。
 - 协同任务会记录每个 Agent 的状态、耗时、原始报告、工具调用、来源、token 用量、总 token 用量、估算成本与风险 verdict；记录保存在 IndexedDB `analysisRuns` store 中，不保存 DeepSeek / Exa API Key 或其他密钥。
 - 四 AI 协同模式成本和耗时高于单 AI：前两个 Agent 并行，但仍会额外消耗多轮 DeepSeek 调用；事实研究员按配置限制搜索次数（默认最多 6 次），搜索失败会降级为 `EXTERNAL_SEARCH_UNAVAILABLE`，不会阻断其他 Agent 和最终降级报告。
-- 当前仍未实现时间加权收益率（TWR）；研究包必须暴露 `performanceMethod: "non_twr"` 及警示：不得把现金流导致的市值变化解释为投资收益或投资能力。
+- 当前已新增 TWR 纯函数与 Performance / 研究包接入：快照充足时暴露 `performanceMethod: "twr"`，快照不足时暴露 `performanceMethod: "insufficient_for_twr"` 并继续警示不得把现金流导致的市值变化解释为投资收益或投资能力。
 
 ## 更新记录 2026-06-24（AI 四 AI 协同模式二）
 
 - 新增协同提示词、研究数据包、协同运行引擎、`analysisRuns` 审计持久化、设置页四角色 Prompt 编辑和 AI 页模式切换/过程展开 UI。
-- 新增测试覆盖研究包 non-TWR 限制、旧配置安全合并、Prompt 默认恢复、协同调度顺序、风险约束 Prompt、搜索上限和协同降级路径。
+- 新增测试覆盖研究包收益口径限制、旧配置安全合并、Prompt 默认恢复、协同调度顺序、风险约束 Prompt、搜索上限和协同降级路径。
+
+
+## 本次更新：TWR 收益口径第一阶段
+
+- 新增 `src/utils/twrEngine.js` 纯函数模块，用 snapshots 与 transactions 计算现金流序列、单期 TWR、累计 TWR 和数据不足状态。
+- Performance 页面新增“累计 TWR”主指标和 TWR 曲线，同时保留账面盈亏并标记为非 TWR 成本口径。
+- 研究包新增 `performance` 字段；快照充足时使用 `performanceMethod: "twr"`，快照不足时使用 `performanceMethod: "insufficient_for_twr"`。
+- 新增 Vitest 测试覆盖追加本金、赎回、多期复合、现金流聚合与快照不足保护。
+
+## 本次更新：TWR 收益口径第二阶段
+
+- Dashboard 总览新增累计 TWR 卡片，并将原总盈亏明确改为账面盈亏。
+- Benchmark 页面将“我的组合”曲线切换为 TWR 归一化曲线，用于和基准代理做收益率口径对比。
+- Risk 页面总体风险指标改用 TWR 单期收益率计算波动率、夏普比率和回撤；类别相关性仍基于类别市值序列并在说明中提示现金流限制。
+- TWR 测试补充零起始市值场景，确保组合从 0 建仓后能跳过无效期间并继续计算后续 TWR。
+
+## 本次更新：TWR 收益口径第三阶段
+
+- 新增类别级 TWR 计算入口 `calculateCategoryTwrSeries()`，按基金当前类别映射交易现金流，并使用快照中的类别市值计算类别 TWR。
+- Risk 页面类别相关性改为基于类别 TWR 收益序列，不再直接用类别市值变化计算相关性。
+- 计算说明补充类别 TWR 的限制：依赖基金类别映射与快照类别市值，历史基金改类会影响旧交易归类。
+
+## 本次更新：TWR 收益口径第四阶段
+
+- 移动端默认首页 Home 将“总盈亏”替换为“累计TWR”，与 Dashboard / Performance 的收益口径保持一致。
+- 研究包新增 `categoryPerformance`，按类别暴露 TWR 摘要与序列，供 AI 协同工作流区分类别表现和类别因子状态。
+- researchContext 测试补充类别 TWR 输出断言。
+
+## 本次更新：TWR 收益口径第五阶段
+
+- 快照生成 `generateSnapshot()` 会读取既有 snapshots 与交易记录，并在新快照上持久化 TWR 派生字段：`performanceMethod`、`twrPeriodReturn`、`twrCumulativeReturn`、`twrObservationCount`、`twrStartDate`、`twrEndDate` 和 `netExternalFlowCents`。
+- 新增 `enrichSnapshotWithTwr()` 纯函数，便于测试和后续迁移旧快照。
+- 新增 snapshot 测试覆盖首个快照数据不足与有历史快照时的 TWR 字段持久化。
+
+
+## 本次更新：TWR 收益口径收尾与 UI 自动化
+
+- 新交易会保存 `fundName` 和交易发生时的 `category`，类别 TWR 优先使用交易自身类别，降低基金后续改类对历史现金流归属的影响。
+- 新增 `backfillSnapshotsWithTwr()` / `backfillSnapshotTwrMetadata()`，并在设置页增加“重算历史TWR”按钮，用于回填旧快照 TWR 元数据。
+- 新增 Playwright Chromium UI 自动化测试与 `npm run test:e2e`，覆盖首页/收益追踪 TWR 文案和设置页历史 TWR 回填入口。
+- 当前剩余主要阻碍：`npm audit` 仍提示 Vite / esbuild / Vitest 链路漏洞，修复需要破坏性升级；生产包主 chunk 仍超过 500 kB，后续需要路由级代码分割。
