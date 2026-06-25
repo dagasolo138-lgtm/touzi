@@ -1,5 +1,6 @@
 import { STEP_PROMPTS } from './analystPrompt.js';
 import { chatCompletion, streamChatCompletion } from './deepseek.js';
+import { buildCategoryFactorSnapshots, formatFactorContextForLLM } from './factorContext.js';
 
 export function buildPortfolioText(holdings = [], config = {}) {
   const yuan = (cents = 0) => Number(cents || 0) / 100;
@@ -83,12 +84,29 @@ async function macro(context, exaSearcher, thinkingMode, apiKey, usageTotal) {
   if (data.needsSearch && exaSearcher) data.searchResults = await Promise.all((data.searchQueries || []).slice(0, 3).map((q) => exaSearcher(q, 'news')));
   return data;
 }
+async function buildPipelineFactorContext(holdings = [], config = {}) {
+  const { getNavHistory } = await import('../db/index.js');
+  const navRows = await getNavHistory();
+  const factorResult = buildCategoryFactorSnapshots({
+    config,
+    funds: holdings,
+    transactions: [],
+    navRows,
+    asOfDate: new Date().toISOString().slice(0, 10),
+  });
+  return formatFactorContextForLLM(factorResult);
+}
+
+function withFactorContext(factorContext, originalUserContent) {
+  return factorContext ? `${factorContext}\n\n${originalUserContent}` : originalUserContent;
+}
+
 function hitlSummary(allocation, technical = [], macroData = {}) {
   const gaps = (allocation?.gaps || []).slice(0, 2).map((g) => `${g.category}${g.deviation < 0 ? '欠配' : '超配'}${Math.abs((g.deviation || 0) * 100).toFixed(0)}%${g.category === allocation.priorityCategory ? '（最优先）' : ''}`).join('，');
   const tech = technical.map((t) => `${t.fundName || t.fundCode}${t.trend || ''}，RSI=${t.rsi14}，入场${t.entryAdvice}`).join('；') || '暂无技术分析';
   return `配置：${gaps || allocation?.recommendation || '暂无配置偏离'}\n技术：${tech}\n宏观：${macroData.macroSummary || '暂无重大宏观影响'}\n→ 建议继续？`;
 }
-async function* finalStream(payload, thinkingMode, apiKey, usageTotal) {
+async function* finalStream(payload, thinkingMode, apiKey, usageTotal, factorContext = '') {
   const queue = [];
   let resolveNext;
   let done = false;
@@ -99,7 +117,7 @@ async function* finalStream(payload, thinkingMode, apiKey, usageTotal) {
   };
   const waitForNext = () => new Promise((resolve) => { resolveNext = resolve; });
   const completion = streamChatCompletion({
-    messages: [{ role: 'user', content: JSON.stringify(payload, null, 2) }],
+    messages: [{ role: 'user', content: withFactorContext(factorContext, JSON.stringify(payload, null, 2)) }],
     systemPrompt: STEP_PROMPTS.final_synthesis,
     thinkingMode,
     apiKey,
@@ -125,40 +143,43 @@ async function* finalStream(payload, thinkingMode, apiKey, usageTotal) {
 export async function* runNewCapital(amount, holdings, config, navFetcher, exaSearcher, thinkingMode, apiKey) {
   const usage = { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 };
   try {
+    const factorContext = await buildPipelineFactorContext(holdings, config);
     yield { type: 'step_start', stepName: 'allocation_analysis', stepLabel: '配置分析' };
-    const aRes = await runStep(STEP_PROMPTS.allocation_analysis, buildPortfolioText(holdings, config), thinkingMode, apiKey); addUsage(usage, aRes.usage); const allocation = parse(aRes.content); yield { type: 'step_done', stepName: 'allocation_analysis', data: allocation, usage: { ...usage } };
+    const aRes = await runStep(STEP_PROMPTS.allocation_analysis, withFactorContext(factorContext, buildPortfolioText(holdings, config)), thinkingMode, apiKey); addUsage(usage, aRes.usage); const allocation = parse(aRes.content); yield { type: 'step_done', stepName: 'allocation_analysis', data: allocation, usage: { ...usage } };
     yield { type: 'step_start', stepName: 'technical_analysis', stepLabel: '技术分析' };
     const technical = await Promise.all(topFundsForGaps(allocation.gaps, holdings).map((f) => technicalForFund(f, navFetcher, thinkingMode, apiKey, usage))); yield { type: 'step_done', stepName: 'technical_analysis', data: technical, usage: { ...usage } };
     yield { type: 'step_start', stepName: 'macro_assessment', stepLabel: '宏观研判' };
     const macroData = await macro({ amount, allocation, technical }, exaSearcher, thinkingMode, apiKey, usage); yield { type: 'step_done', stepName: 'macro_assessment', data: macroData, usage: { ...usage } };
     yield { type: 'hitl', summary: hitlSummary(allocation, technical, macroData) };
     yield { type: 'step_start', stepName: 'final_synthesis', stepLabel: '生成建议' };
-    yield* finalStream({ skill: 'new_capital', amount, allocation, technical, macro: macroData }, thinkingMode, apiKey, usage);
+    yield* finalStream({ skill: 'new_capital', amount, allocation, technical, macro: macroData }, thinkingMode, apiKey, usage, factorContext);
   } catch (e) { yield { type: 'error', message: e.message }; }
 }
 
 export async function* runFundDive(fundCode, fundName, holdings, config, navFetcher, exaSearcher, thinkingMode, apiKey) {
   const usage = { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 };
   try {
+    const factorContext = await buildPipelineFactorContext(holdings, config);
     const fund = holdings.find((h) => h.code === fundCode || h.name?.includes(fundName)) || { code: fundCode, name: fundName };
     yield { type: 'step_start', stepName: 'technical_analysis', stepLabel: '技术分析' };
     const technical = await technicalForFund(fund, navFetcher, thinkingMode, apiKey, usage); yield { type: 'step_done', stepName: 'technical_analysis', data: technical, usage: { ...usage } };
     yield { type: 'step_start', stepName: 'macro_assessment', stepLabel: '宏观研判' };
     const macroData = await macro({ fund, technical }, exaSearcher, thinkingMode, apiKey, usage); yield { type: 'step_done', stepName: 'macro_assessment', data: macroData, usage: { ...usage } };
     yield { type: 'step_start', stepName: 'allocation_analysis', stepLabel: '持仓上下文' };
-    const aRes = await runStep(STEP_PROMPTS.allocation_analysis, buildPortfolioText(holdings, config), thinkingMode, apiKey); addUsage(usage, aRes.usage); const allocation = parse(aRes.content); yield { type: 'step_done', stepName: 'allocation_analysis', data: allocation, usage: { ...usage } };
+    const aRes = await runStep(STEP_PROMPTS.allocation_analysis, withFactorContext(factorContext, buildPortfolioText(holdings, config)), thinkingMode, apiKey); addUsage(usage, aRes.usage); const allocation = parse(aRes.content); yield { type: 'step_done', stepName: 'allocation_analysis', data: allocation, usage: { ...usage } };
     yield { type: 'hitl', summary: hitlSummary(allocation, [technical], macroData) };
     yield { type: 'step_start', stepName: 'final_synthesis', stepLabel: '生成建议' };
-    yield* finalStream({ skill: 'fund_dive', fund, allocation, technical, macro: macroData }, thinkingMode, apiKey, usage);
+    yield* finalStream({ skill: 'fund_dive', fund, allocation, technical, macro: macroData }, thinkingMode, apiKey, usage, factorContext);
   } catch (e) { yield { type: 'error', message: e.message }; }
 }
 
 export async function* runHealthCheck(holdings, config, thinkingMode, apiKey) {
   const usage = { prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0 };
   try {
+    const factorContext = await buildPipelineFactorContext(holdings, config);
     yield { type: 'step_start', stepName: 'allocation_analysis', stepLabel: '配置分析' };
-    const aRes = await runStep(STEP_PROMPTS.allocation_analysis, buildPortfolioText(holdings, config), thinkingMode, apiKey); addUsage(usage, aRes.usage); const allocation = parse(aRes.content); yield { type: 'step_done', stepName: 'allocation_analysis', data: allocation, usage: { ...usage } };
+    const aRes = await runStep(STEP_PROMPTS.allocation_analysis, withFactorContext(factorContext, buildPortfolioText(holdings, config)), thinkingMode, apiKey); addUsage(usage, aRes.usage); const allocation = parse(aRes.content); yield { type: 'step_done', stepName: 'allocation_analysis', data: allocation, usage: { ...usage } };
     yield { type: 'step_start', stepName: 'final_synthesis', stepLabel: '生成报告' };
-    yield* finalStream({ skill: 'health_check', allocation }, thinkingMode, apiKey, usage);
+    yield* finalStream({ skill: 'health_check', allocation }, thinkingMode, apiKey, usage, factorContext);
   } catch (e) { yield { type: 'error', message: e.message }; }
 }

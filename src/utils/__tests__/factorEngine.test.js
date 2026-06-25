@@ -1,8 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { buildFactorSnapshot, calcAllocationPriority, calcDrawdownFromPeak, calcPriceCondition, calcPricePercentile, mergeFactorSettings, normalizeNavHistory, suggestDcaMultiplier } from '../factorEngine.js';
+import { buildFactorSnapshot, calcAllocationPriority, calcDrawdownFromPeak, calcPriceCondition, calcPricePercentile, mergeFactorSettings, normalizeNavHistory, suggestDcaMultiplier, evaluateHoldingWarning } from '../factorEngine.js';
 
 const day = (n) => `2024-${String(Math.floor((n - 1) / 28) + 1).padStart(2, '0')}-${String(((n - 1) % 28) + 1).padStart(2, '0')}`;
 const rows = (count, fn = (i) => i + 1) => Array.from({ length: count }, (_, i) => ({ date: day(i + 1), nav: fn(i) }));
+
+describe('evaluateHoldingWarning', () => {
+  it('warns about loss aversion when losing at a high percentile', () => {
+    expect(evaluateHoldingWarning({ pnlPct: -0.2, percentile: 0.7, drawdown: -0.05 })).toMatchObject({ type: 'loss_aversion', severity: 'warning' });
+  });
+
+  it('warns about overconfidence when gains are large at a high percentile', () => {
+    expect(evaluateHoldingWarning({ pnlPct: 0.35, percentile: 0.85, drawdown: 0 })).toMatchObject({ type: 'overconfidence', severity: 'caution' });
+  });
+
+  it('returns null when pnl is invalid or thresholds are not met', () => {
+    expect(evaluateHoldingWarning({ pnlPct: Number.NaN, percentile: 0.9, drawdown: 0 })).toBeNull();
+    expect(evaluateHoldingWarning({ pnlPct: -0.1, percentile: 0.9, drawdown: -0.1 })).toBeNull();
+  });
+});
 
 describe('factorEngine', () => {
   it('normalizes nav history by sorting, deduping invalid rows, and truncating asOfDate', () => {

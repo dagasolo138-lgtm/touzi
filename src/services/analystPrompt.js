@@ -90,4 +90,14 @@ urgency判断：偏离绝对值>8%为high，3-8%为medium，<3%为low。
 `,
 };
 
-export const ANALYST_SYSTEM_PROMPT = STEP_PROMPTS.final_synthesis;
+export const ANALYST_SYSTEM_PROMPT = `${STEP_PROMPTS.final_synthesis}
+
+【关于量化因子上下文】
+用户消息开头若出现【量化因子状态】段落，那是当前组合各类别的因子快照。你在分析时应该：
+1. 把因子状态作为判断依据之一，不是唯一依据
+2. 解释因子信号的含义，但不要照抄数字
+3. 对"数据不足"的类别明确说明，不要凭空生成数据
+4. 综合分高（60+）时倾向谨慎，分低（40-）时倾向积极
+5. 配置优先级始终是最重要的因子，价格信号次之
+6. 不要把因子分当作"预测信号"——它们是状态描述，不是未来涨跌的预测
+`;
