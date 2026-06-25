@@ -43,42 +43,37 @@ export function calcSharpe(dailyReturns, riskFreeAnnual = 0.02) {
 }
 
 // 相关性矩阵（Pearson）
-export function calcCorrelationMatrix(seriesMap) {
-  // seriesMap: { "A股": [v1,v2,...], "QDII": [...], ... }
-  // 返回: { categories, matrix }
-  // matrix[i][j] = 类别i和类别j的相关系数
-  const categories = Object.keys(seriesMap);
-  const returns = {};
-  categories.forEach(cat => {
-    const vals = seriesMap[cat];
-    returns[cat] = vals.slice(1).map((v, i) => (v - vals[i]) / vals[i]);
+export function calcCorrelationMatrix(seriesWithDates) {
+  const categories = Object.keys(seriesWithDates);
+  const returnsByDate = {};
+  categories.forEach((cat) => {
+    const series = seriesWithDates[cat] || [];
+    returnsByDate[cat] = {};
+    for (let i = 1; i < series.length; i += 1) {
+      const date = series[i].date;
+      const prev = Number(series[i - 1].value);
+      const curr = Number(series[i].value);
+      if (date && prev > 0 && Number.isFinite(curr)) returnsByDate[cat][date] = (curr - prev) / prev;
+    }
   });
 
-  function pearson(a, b) {
-    const n = Math.min(a.length, b.length);
-    if (n < 5) return null;
-    const ax = a.slice(0, n), bx = b.slice(0, n);
-    const ma = ax.reduce((s,v)=>s+v,0)/n;
-    const mb = bx.reduce((s,v)=>s+v,0)/n;
-    const num = ax.reduce((s,v,i)=>s+(v-ma)*(bx[i]-mb),0);
-    const da = Math.sqrt(ax.reduce((s,v)=>s+(v-ma)**2,0));
-    const db = Math.sqrt(bx.reduce((s,v)=>s+(v-mb)**2,0));
-    if (da===0||db===0) return null;
-    return num/(da*db);
+  function pearsonAligned(catA, catB) {
+    const datesB = new Set(Object.keys(returnsByDate[catB]));
+    const commonDates = Object.keys(returnsByDate[catA]).filter((date) => datesB.has(date));
+    if (commonDates.length < 5) return null;
+    const a = commonDates.map((date) => returnsByDate[catA][date]);
+    const b = commonDates.map((date) => returnsByDate[catB][date]);
+    const n = a.length;
+    const ma = a.reduce((sum, value) => sum + value, 0) / n;
+    const mb = b.reduce((sum, value) => sum + value, 0) / n;
+    const num = a.reduce((sum, value, index) => sum + (value - ma) * (b[index] - mb), 0);
+    const da = Math.sqrt(a.reduce((sum, value) => sum + (value - ma) ** 2, 0));
+    const db = Math.sqrt(b.reduce((sum, value) => sum + (value - mb) ** 2, 0));
+    if (da === 0 || db === 0) return null;
+    return num / (da * db);
   }
 
-  const matrix = categories.map(() => categories.map(() => null));
-  categories.forEach((a, i) => {
-    categories.forEach((b, j) => {
-      if (i === j) {
-        matrix[i][j] = 1;
-      } else if (j > i) {
-        const value = pearson(returns[a], returns[b]);
-        matrix[i][j] = value;
-        matrix[j][i] = value;
-      }
-    });
-  });
+  const matrix = categories.map((a) => categories.map((b) => (a === b ? 1 : pearsonAligned(a, b))));
   return { categories, matrix };
 }
 

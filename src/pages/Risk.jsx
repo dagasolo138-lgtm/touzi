@@ -136,7 +136,7 @@ export default function Risk() {
     const categoryTwr = calculateCategoryTwrSeries({ categories: CATEGORIES, funds, snapshots, transactions });
     const seriesMap = Object.fromEntries(CATEGORIES.map((category) => [
       category,
-      (categoryTwr[category]?.series || []).filter((row) => row.status === 'ok').map((row) => (1 + row.cumulativeReturn) * 100),
+      (categoryTwr[category]?.series || []).filter((row) => row.status === 'ok').map((row) => ({ date: row.endDate, value: (1 + row.cumulativeReturn) * 100 })),
     ]));
     const noData = Object.fromEntries(CATEGORIES.map((category) => [category, seriesMap[category].length < 2]));
     const correlation = calcCorrelationMatrix(seriesMap);

@@ -79,6 +79,7 @@ export default function TransactionForm({ funds = [], editing, onSaved, onBefore
       const selectedFund = funds.find((fund) => fund.code === form.fundCode);
       const transaction = {
         id: editing?.id || makeId(),
+        createdAt: editing?.createdAt || Date.now(),
         date: form.date,
         fundCode: form.fundCode,
         fundName: selectedFund?.name || editing?.fundName || '',

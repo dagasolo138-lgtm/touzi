@@ -5,6 +5,7 @@ import { calcRSI } from '../utils/riskEngine.js';
 import { buildPortfolio } from '../utils/positionEngine.js';
 import { buildCategoryFactorSnapshots } from '../services/factorContext.js';
 import { suggestDcaMultiplier } from '../utils/factorEngine.js';
+import { validateTransactionSave } from '../utils/transactionValidation.js';
 import { formatMoney, makeId, today, yuanToCents } from '../utils/formatters.js';
 
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -194,7 +195,13 @@ export default function DCA() {
 
     setExecuteSaving(true);
     try {
-      await saveTransaction({ date: todayStr, fundCode: executing.fundCode, type: 'buy', shares, price, amount, amountCents: yuanToCents(amount), fee, feeCents: yuanToCents(fee), notes: '定投执行' });
+      const candidateTx = { id: makeId(), date: todayStr, fundCode: executing.fundCode, type: 'buy', shares, price, amount, amountCents: yuanToCents(amount), fee, feeCents: yuanToCents(fee), notes: '定投执行' };
+      const validation = await validateTransactionSave(candidateTx);
+      if (!validation.valid) {
+        setError(validation.error);
+        return;
+      }
+      await saveTransaction(candidateTx);
       await saveDcaPlan({ ...executing, lastExecutedDate: todayStr, executionCount: (Number(executing.executionCount) || 0) + 1 });
       setExecuting(null);
       setError('');
