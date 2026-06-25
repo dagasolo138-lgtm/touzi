@@ -1,7 +1,8 @@
 import { buildCategoryFactorSnapshots } from './factorContext.js';
+import { calculateCategoryTwrSeries, calculateTwrSeries, summarizeTwr } from '../utils/twrEngine.js';
 
 const DAY_MS = 86400000;
-const TWR_WARNING = '当前组合收益与风险统计尚未完成时间加权收益率校正；不得把现金流导致的市值变化解释为投资收益。';
+const TWR_WARNING = '当前组合收益与风险统计会优先使用时间加权收益率（TWR）；当快照不足时，不得把现金流导致的市值变化解释为投资收益。';
 
 function latestNavMap(navRows = []) {
   return navRows.reduce((map, row) => {
@@ -27,6 +28,8 @@ export function summarizeResearchPacket(packet) {
     portfolio: { ...packet.portfolio, holdings: packet.portfolio.holdings.map((h) => ({ code: h.code, name: h.name, category: h.category, value: h.value, weight: h.weight, latestNavDate: h.latestNavDate, navHistoryCount: h.navHistoryCount, navStale: h.navStale })) },
     categoryBreakdown: packet.categoryBreakdown,
     factorSnapshots: packet.factorSnapshots,
+    performance: packet.performance,
+    categoryPerformance: packet.categoryPerformance,
     performanceLimitation: packet.performanceLimitation,
     knownLimitations: packet.knownLimitations,
   };
@@ -49,6 +52,14 @@ export function buildResearchPacket({ config = {}, funds = [], transactions = []
   }));
   const txSummary = transactions.reduce((map, tx) => { const k = tx.fundCode; if (!map[k]) map[k] = { buyCount: 0, sellCount: 0, totalAmount: 0, totalFee: 0 }; map[k][tx.type === 'sell' ? 'sellCount' : 'buyCount'] += 1; map[k].totalAmount += Number(tx.amountCents || 0) / 100 || Number(tx.amount || 0); map[k].totalFee += Number(tx.feeCents || 0) / 100 || Number(tx.fee || 0); return map; }, {});
   const missingSignalFunds = (config.categories || []).filter((c) => !config.factorSettings?.categorySignalFunds?.[c]);
+  const twrResult = calculateTwrSeries({ snapshots, transactions });
+  const twrSummary = summarizeTwr(twrResult);
+  const categoryTwr = calculateCategoryTwrSeries({ categories: config.categories || [], funds, snapshots, transactions });
+  const categoryPerformance = Object.fromEntries((config.categories || []).map((category) => {
+    const summary = summarizeTwr(categoryTwr[category]);
+    return [category, { ...summary, series: categoryTwr[category]?.series || [] }];
+  }));
+  const twrLimitation = twrSummary.performanceMethod === 'twr' ? null : TWR_WARNING;
   return {
     asOfDate,
     generatedAt: new Date().toISOString(),
@@ -59,7 +70,9 @@ export function buildResearchPacket({ config = {}, funds = [], transactions = []
     dcaPlans: dcaPlans.map((p) => ({ ...p })),
     transactionSummaryByFund: txSummary,
     snapshotSummary: { count: snapshots.length, latestDate: snapshots.at?.(-1)?.date || null },
-    performanceLimitation: { performanceMethod: 'non_twr', warning: TWR_WARNING },
-    knownLimitations: [TWR_WARNING, '研究包仅包含近期净值摘要；完整原始净值历史仅在 Agent 明确调用工具时查询。'],
+    performance: { ...twrSummary, series: twrResult.series || [] },
+    categoryPerformance,
+    performanceLimitation: { performanceMethod: twrSummary.performanceMethod, warning: twrLimitation, reason: twrSummary.reason || null },
+    knownLimitations: [twrLimitation, '研究包仅包含近期净值摘要；完整原始净值历史仅在 Agent 明确调用工具时查询。'].filter(Boolean),
   };
 }

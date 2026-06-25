@@ -1,6 +1,6 @@
 # investment-dashboard
 
-个人投资仪表盘：React 18 + Vite + Tailwind CSS + IndexedDB + Cloudflare Worker Proxy。
+个人投资仪表盘：React 18 + Vite + Tailwind CSS + IndexedDB + Cloudflare Worker Proxy，支持账面盈亏与时间加权收益率（TWR）口径。
 
 ## 本地开发
 
